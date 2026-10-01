@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Search Launcher Edge History Sync",
+  "version": "1.1.0",
+  "description": "Edgeの履歴をSearch Launcherへバックグラウンド同期します。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApsRvE5fjc1++Ueu9RcgDBuou8mlSRc09vnSY//waB8d5vcisUzHsYWRrt7LKpF4m3jytLBP2zJeNwJrk2zv7zr/fHN1e8t+DM4HaaZ1/xN75Vc51HkgnNAtlvF37wb9/YpmqhZTEAWwkHv2bQCcWmaTX44k/k8NAEF2hDrPz1CCT3tmK25aubPkKWfkDaNoj9SQtcSuLqup6/5a+vrIHOX78oBxluW645NbUAntY6k2Wb+/BxDuc8SRmTz9GUEUx/ViIPsRp/MU8d7q8AQ77o4rNlM8yzumysGZqVBGvlaHocLw/YG0YBSEgwc582y8owiUjwkSKkWck2YW0Lcyj2QIDAQAB",
+  "permissions": ["history", "nativeMessaging", "storage", "alarms", "activeTab"],
+  "action": { "default_title": "Favorite Launcherへ保存", "default_popup": "popup.html" },
+  "background": { "service_worker": "service_worker.js" }
+}
