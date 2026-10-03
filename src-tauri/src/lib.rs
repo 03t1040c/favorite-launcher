@@ -82,6 +82,14 @@ fn save_board_layout(value: String) -> Result<(), String> {
     db::save_board_layout(&value).map_err(|e|e.to_string())
 }
 #[tauri::command]
+fn get_ui_preferences() -> Result<db::UiPreferences, String> {
+    db::get_ui_preferences().map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn save_ui_preferences(preferences: db::UiPreferences) -> Result<(), String> {
+    db::save_ui_preferences(preferences).map_err(|e|e.to_string())
+}
+#[tauri::command]
 async fn move_board_item(id: i64, pane: i64, before_id: Option<i64>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || db::move_board_item(id,pane,before_id).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
@@ -133,6 +141,10 @@ fn place_favorite_columns(tab_id: i64, ids: Vec<i64>) -> Result<(), String> {
 #[tauri::command]
 fn delete_favorite_column(id: i64, target_pane: i64) -> Result<(), String> {
     db::delete_favorite_column(id, target_pane).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn delete_favorite_group(id:i64) -> Result<usize,String> {
+    db::delete_favorite_group(id).map_err(|e|e.to_string())
 }
 #[tauri::command]
 async fn record_favorite_open(id: i64) -> Result<(), String> {
@@ -613,7 +625,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin({
             let shortcut_builder =
-                match GlobalShortcutBuilder::new().with_shortcuts(["CommandOrControl+Space"]) {
+                if cfg!(debug_assertions) && std::env::var_os("FAVORITE_LAUNCHER_TEST_DIR").is_some() {GlobalShortcutBuilder::new()} else {match GlobalShortcutBuilder::new().with_shortcuts(["CommandOrControl+Space"]) {
                     Ok(builder) => builder,
                     Err(error) => {
                         eprintln!(
@@ -622,7 +634,7 @@ pub fn run() {
                         );
                         GlobalShortcutBuilder::new()
                     }
-                };
+                }};
             shortcut_builder
                 .with_handler(|app, shortcut, _event| {
                     let shortcut_text = shortcut.to_string().to_ascii_lowercase();
@@ -758,6 +770,8 @@ pub fn run() {
             list_favorite_columns,
             prepare_favorite_board,
             save_board_layout,
+            get_ui_preferences,
+            save_ui_preferences,
             move_board_item,
             open_edge_extensions,
             get_file_filter,
@@ -771,6 +785,7 @@ pub fn run() {
             move_favorite_column,
             place_favorite_columns,
             delete_favorite_column,
+            delete_favorite_group,
             record_favorite_open,
             list_deleted_favorites,
             restore_deleted_favorite,

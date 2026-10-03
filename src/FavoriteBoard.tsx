@@ -12,14 +12,14 @@ type Props = {
   renderItem: (id: number, pane: number) => ReactNode;
   moveItem: (id: number, pane: number) => Promise<void>;
   toast: (message: string) => void; limit: number; initialColor: string;
-  colors: string[]; children: ReactNode;
+  colors: string[]; organizing: boolean; showSearch: boolean;
 };
 
 export default function FavoriteBoard(props: Props) {
   const [layout, setLayout] = useState<Layout>({});
   const [ready, setReady] = useState(false);
   const [search, setSearch] = useState('');
-  const [organizing, setOrganizing] = useState(false);
+  const organizing = props.organizing;
   const [menu, setMenu] = useState<number | null>(null);
   const [menuAnchor, setMenuAnchor] = useState({x:0,y:0});
   const [rename, setRename] = useState<{ id: number; text: string } | null>(null);
@@ -60,11 +60,6 @@ export default function FavoriteBoard(props: Props) {
   const act = async (action: () => Promise<unknown>) => {
     try { await action(); await props.reload(); } catch (error) { props.toast(String(error)); await props.reload(); }
   };
-  const createGroup = () => void act(async () => {
-    const id = await invoke<number>('add_favorite_column', { tabId: props.activeTab, limit: props.limit });
-    await invoke('update_favorite_column', { id, name: '新しいグループ', color: props.initialColor });
-    setRename({ id, text: '新しいグループ' });
-  });
   const renameGroup = async (group: Group) => {
     if (!rename) return;
     setRename(null);
@@ -74,16 +69,20 @@ export default function FavoriteBoard(props: Props) {
     const node = document.elementFromPoint(x, y);
     const tab = node?.closest<HTMLElement>('[data-favorite-tab-id]');
     if (tab) return { type: 'tab', id: Number(tab.dataset.favoriteTabId) };
-    const group = node?.closest<HTMLElement>('[data-board-group]');
-    if (!group) { const column = node?.closest<HTMLElement>('[data-board-column]'); return column ? {type:'column',id:Number(column.dataset.boardColumn)} : null; }
-    const rect = group.getBoundingClientRect();
-    return { type: 'group', id: Number(group.dataset.boardGroup), after: x > rect.left + rect.width/2 || y > rect.top + rect.height/2 };
+    const column=node?.closest<HTMLElement>('[data-board-column]');
+    if(!column)return null;
+    const groups=Array.from(column.querySelectorAll<HTMLElement>('[data-board-group]')).filter(group=>Number(group.dataset.boardGroup)!==dragRef.current?.id);
+    const before=groups.find(group=>{const rect=group.getBoundingClientRect();return y<rect.top+rect.height/2;});
+    const group=before??groups[groups.length-1];
+    if(!group)return {type:'column',id:Number(column.dataset.boardColumn)};
+    return {type:'group',id:Number(group.dataset.boardGroup),after:!before};
   };
   const finishDrag = (x: number, y: number) => {
-    const current = dragRef.current; dragRef.current = null;
+    const current = dragRef.current;
+    const target = targetAt(x, y);
+    dragRef.current = null;
     setDrag(null); setDrop(null);
     if (!current?.moved) return;
-    const target = targetAt(x, y);
     if (!target) return;
     const group = props.groups.find(g => g.id === current.id);
     if (!group) return;
@@ -101,7 +100,7 @@ export default function FavoriteBoard(props: Props) {
     });
   };
 
-  const text = search.trim().toLocaleLowerCase();
+  const text = props.showSearch ? search.trim().toLocaleLowerCase() : '';
   const matches = props.items.filter(item => item.kind === 'link' && `${item.label} ${item.target ?? ''}`.toLocaleLowerCase().includes(text));
   const visibleGroups = props.groups.filter(group => text ? matches.some(item => item.pane === group.id) || group.name.toLocaleLowerCase().includes(text) : group.tabId === props.activeTab);
   const columnOf = (group: Group) => Math.min(props.limit - 1, layout.groups?.[group.id]?.column ?? props.groups.filter(g => g.tabId === group.tabId).findIndex(g => g.id === group.id) % props.limit);
@@ -115,10 +114,10 @@ export default function FavoriteBoard(props: Props) {
   },[ready,props.groups,props.limit]);
 
   return <>
-    <div className="board-controls"><input aria-label="全タブのお気に入りを検索" placeholder="お気に入りを検索（すべてのタブ）" value={search} onChange={event => setSearch(event.target.value)} /><button className={organizing ? 'active' : ''} onClick={() => setOrganizing(!organizing)}>{organizing ? '整理を完了' : '整理'}</button><button onClick={createGroup}>＋ グループ</button></div>
+    {props.showSearch && <div className="board-controls"><input aria-label="全タブのお気に入りを検索" placeholder="お気に入りを検索（すべてのタブ）" value={search} onChange={event => setSearch(event.target.value)} /></div>}
     <div className={`favorite-panes board-grid${organizing ? ' organizing' : ''}`} style={{gridTemplateColumns:`repeat(${props.limit},minmax(0,1fr))`}} onClick={() => setMenu(null)}>
       {!ready ? <div className="board-empty">お気に入りを準備しています…</div> : <>
-        {Array.from({length:props.limit},(_,column) => <div className={`board-column${drop?.type === 'column' && drop.id === column ? ' column-drop-tab' : ''}`} data-board-column={column} key={column}><div className="board-column-caption">列 {column+1}</div>{visibleGroups.filter(group => columnOf(group) === column).map(group => {
+{Array.from({length:props.limit},(_,column) => <div className={`board-column${drop?.type === 'column' && drop.id === column ? ' column-drop-tab' : ''}`} data-board-column={column} key={column}>{visibleGroups.filter(group => columnOf(group) === column).map(group => {
           const config = layout.groups?.[group.id] ?? {};
           const items = props.items.filter(item => item.pane === group.id && item.kind === 'link' && (!text || group.name.toLocaleLowerCase().includes(text) || matches.includes(item)));
           return <section key={group.id} data-board-group={group.id} data-favorite-pane={group.id} className={`board-group${drag === group.id ? ' board-dragging' : ''}${drop?.type === 'group' && drop.id === group.id ? ` board-drop${drop.after ? ' board-drop-after' : ''}` : ''}`} style={{ borderTopColor: group.color }}>
@@ -128,8 +127,8 @@ export default function FavoriteBoard(props: Props) {
               <span>{items.length}</span><button className="board-menu-toggle" title="グループ設定" aria-label={`${group.name}の設定`} onClick={event => { event.stopPropagation(); const rect=event.currentTarget.getBoundingClientRect(); setMenuAnchor({x:Math.max(8,Math.min(window.innerWidth-240,rect.right-230)),y:Math.max(8,Math.min(window.innerHeight-390,rect.bottom+5))}); setMenu(menu === group.id ? null : group.id); }}>⋯</button>
             </header>
             {text && <small className="board-location">{props.tabs.find(tab => tab.id === group.tabId)?.name}</small>}
-{menu === group.id && createPortal(<div className="board-menu" style={{position:"fixed",left:menuAnchor.x,top:menuAnchor.y,maxHeight:"min(380px,80vh)",overflowY:"auto"}} onClick={event => event.stopPropagation()}><button onClick={() => { setRename({ id: group.id, text: group.name }); setMenu(null); }}>名前を変更</button><label>表示する列<select value={columnOf(group)} onChange={event => changeLayout(group.id,{column:Number(event.target.value)})}>{Array.from({length:props.limit},(_,index)=><option key={index} value={index}>列 {index+1}</option>)}</select></label><div className="board-colors">{props.colors.map(color => <button key={color} aria-label={`色 ${color}`} style={{ background: color }} onClick={() => void act(() => invoke('update_favorite_column', { id: group.id, name: group.name, color }))} />)}</div><label>タブへ移動<select value={group.tabId} onChange={event => void act(() => invoke('move_favorite_column', { id: group.id, tabId: Number(event.target.value), limit: props.limit }))}>{props.tabs.map(tab => <option key={tab.id} value={tab.id}>{tab.name}</option>)}</select></label><button className="danger" onClick={() => { if (confirm(`「${group.name}」を削除しますか？リンクは検索下の追加されたお気に入りへ移動します。`)) void act(() => invoke('delete_favorite_column', { id: group.id, targetPane: 0 })); }}>グループを削除</button></div>, document.body)}
-            {!config.collapsed || text ? <div className="favorites-list unified">{items.length ? items.map(item => <div key={item.id}>{props.renderItem(item.id, group.id)}{organizing && <select aria-label={`${item.label}の移動先`} value={item.pane} onChange={event => void act(() => props.moveItem(item.id, Number(event.target.value)))}><option value={0}>未整理</option>{props.groups.map(target => <option key={target.id} value={target.id}>{props.tabs.find(tab => tab.id === target.tabId)?.name} / {target.name}</option>)}</select>}</div>) : <div className="board-empty">ここへリンクをドラッグ</div>}</div> : null}
+{menu === group.id && createPortal(<div className="board-menu" style={{position:"fixed",left:menuAnchor.x,top:menuAnchor.y,maxHeight:"min(380px,80vh)",overflowY:"auto"}} onClick={event => event.stopPropagation()}><button onClick={() => { setRename({ id: group.id, text: group.name }); setMenu(null); }}>名前を変更</button><label>表示する列<select value={columnOf(group)} onChange={event => changeLayout(group.id,{column:Number(event.target.value)})}>{Array.from({length:props.limit},(_,index)=><option key={index} value={index}>列 {index+1}</option>)}</select></label><div className="board-colors">{props.colors.map(color => <button key={color} aria-label={`色 ${color}`} style={{ background: color }} onClick={() => void act(() => invoke('update_favorite_column', { id: group.id, name: group.name, color }))} />)}</div><label>タブへ移動<select value={group.tabId} onChange={event => void act(() => invoke('move_favorite_column', { id: group.id, tabId: Number(event.target.value), limit: props.limit }))}>{props.tabs.map(tab => <option key={tab.id} value={tab.id}>{tab.name}</option>)}</select></label><button className="danger" onClick={() => { if (confirm(`「${group.name}」と中のリンク${props.items.filter(item=>item.pane===group.id && item.kind==='link').length}件をすべて削除します。\n残したいリンクは事前に別のグループへ移動してください。\n削除してよろしいですか？`)) void act(async () => {const count=await invoke<number>('delete_favorite_group',{id:group.id}); setMenu(null); props.toast(`グループと中の${count}件を削除しました。`);}); }}>グループを削除</button></div>, document.body)}
+            {!config.collapsed || text ? <div className="favorites-list unified">{items.length ? items.map(item => <div key={item.id}>{props.renderItem(item.id, group.id)}</div>) : <div className="board-empty">ここへリンクをドラッグ</div>}</div> : null}
           </section>;
         })}<button className="column-add-group" onClick={() => void act(async () => {const id = await invoke<number>('add_favorite_column',{tabId:props.activeTab,limit:100}); await invoke('update_favorite_column',{id,name:'新しいグループ',color:props.initialColor}); changeLayout(id,{column}); setRename({id,text:'新しいグループ'});})}>＋ グループ</button></div>)}
         {text && !visibleGroups.length && <div className="board-empty">一致するお気に入りはありません。</div>}

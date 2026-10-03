@@ -190,7 +190,7 @@ impl Default for AppSettings {
 impl AppSettings {
     fn sanitized(self) -> Self {
         let quick_keywords = sanitize_lines(self.quick_keywords, 50);
-        let blocked_words = sanitize_lines(self.blocked_words, 100);
+        let blocked_words = sanitize_lines(self.blocked_words, 200);
         let site_names = sanitize_lines(self.site_names, 100);
 
         Self {
@@ -215,7 +215,7 @@ impl AppSettings {
             window_size: sanitize_window_size(&self.window_size),
             index_folders: sanitize_lines(self.index_folders, 10),
             favorite_pane_count: self.favorite_pane_count.clamp(1, 10),
-            left_pane_percent: self.left_pane_percent.clamp(30, 75),
+            left_pane_percent: self.left_pane_percent.clamp(15, 75),
             favorite_density: match self.favorite_density.as_str() {
                 "compact" => "compact",
                 "comfortable" => "comfortable",
@@ -2673,6 +2673,7 @@ pub fn toggle_favorite(id: i64) -> Result<bool, Box<dyn Error>> {
         tx.commit()?;
         return Ok(false);
     }
+    let title = clean_favorite_title(&title,&blocked_words_for_connection(&tx)?);
     tx.execute("INSERT INTO favorite_items(kind,history_id,label,target,service,pane,position) SELECT 'link',NULL,?1,?2,?3,0,COALESCE(MAX(position),-1)+1 FROM favorite_items WHERE pane=0",params![title,url,service])?;
     tx.execute(
         "UPDATE history SET is_favorite=1 WHERE lower(url)=lower(?1)",
@@ -2740,7 +2741,8 @@ pub fn import_extension_history_queue() -> Result<usize, Box<dyn Error>> {
         if !(item.url.starts_with("https://") || item.url.starts_with("http://")) { continue; }
         let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM favorite_items WHERE deleted_at IS NULL AND lower(target)=lower(?1))",params![item.url],|r|r.get(0))?;
         if !exists {
-            tx.execute("INSERT INTO favorite_items(kind,label,target,service,pane,position) SELECT 'link',?1,?2,?3,?4,COALESCE(MAX(position),-1)+1 FROM favorite_items WHERE pane=?4",params![item.title.unwrap_or_else(||item.url.clone()),item.url,classify_service_from_url(&item.url),pane])?;
+            let title = clean_favorite_title(&item.title.unwrap_or_else(||item.url.clone()),&blocked_words_for_connection(&tx)?);
+            tx.execute("INSERT INTO favorite_items(kind,label,target,service,pane,position) SELECT 'link',?1,?2,?3,?4,COALESCE(MAX(position),-1)+1 FROM favorite_items WHERE pane=?4",params![title,item.url,classify_service_from_url(&item.url),pane])?;
             count += 1;
         }
     }
@@ -2952,12 +2954,40 @@ pub fn add_favorite_heading(label: &str, pane: i64, color: &str) -> Result<i64, 
     Ok(conn.last_insert_rowid())
 }
 
+fn blocked_words_for_connection(conn: &Connection) -> Result<Vec<String>,Box<dyn Error>> {
+    let raw: Option<String> = conn.query_row("SELECT blocked_words FROM settings WHERE id=1",[],|r|r.get(0)).optional()?;
+    Ok(raw.map(|value|serde_json::from_str(&value)).transpose()?.unwrap_or_default())
+}
+fn clean_favorite_title(title: &str, words: &[String]) -> String {
+    let mut value=title.to_string();
+    for word in words.iter().filter(|word|!word.is_empty()) {
+        if let Ok(pattern)=regex::RegexBuilder::new(&regex::escape(word)).case_insensitive(true).build() {value=pattern.replace_all(&value,"").into_owned();}
+    }
+    static SEPARATORS: Lazy<regex::Regex> = Lazy::new(||regex::Regex::new(r"[\s\-_:–—]{2,}").unwrap());
+    value=SEPARATORS.replace_all(&value," ").into_owned();
+    value=value.trim_matches(|ch:char|ch.is_whitespace() || "-_:–—".contains(ch)).to_string();
+    if value.is_empty() {"名称未設定".to_string()} else {value}
+}
+fn migrate_stored_titles(conn: &mut Connection) -> Result<(),Box<dyn Error>> {
+    let tx=conn.transaction()?;
+    let (raw,sites):(String,String)=tx.query_row("SELECT blocked_words,site_names FROM settings WHERE id=1",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let mut words:Vec<String>=serde_json::from_str(&raw)?;
+    for site in serde_json::from_str::<Vec<String>>(&sites)? {if !words.iter().any(|word|word.eq_ignore_ascii_case(&site)){words.push(site);}}
+    tx.execute("UPDATE settings SET blocked_words=?1,site_names='[]' WHERE id=1",params![serde_json::to_string(&words)?])?;
+    let items:Vec<(i64,String)>={let mut stmt=tx.prepare("SELECT id,label FROM favorite_items WHERE kind='link'")?;let rows=stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>()?;rows};
+    for (id,title) in items {let cleaned=clean_favorite_title(&title,&words);if cleaned!=title{tx.execute("INSERT OR IGNORE INTO app_meta(key,value) VALUES(?1,?2)",params![format!("original_favorite_title_{id}"),title])?;tx.execute("UPDATE favorite_items SET label=?1 WHERE id=?2",params![cleaned,id])?;}}
+    tx.execute("INSERT INTO app_meta(key,value) VALUES('stored_clean_titles','1')",[])?;
+    tx.commit()?;Ok(())
+}
 pub fn add_manual_favorite(label: &str, target: &str, pane: i64) -> Result<i64, Box<dyn Error>> {
+    let conn = Connection::open(db_path()?)?;
+    add_manual_favorite_in_connection(&conn,label,target,pane)
+}
+fn add_manual_favorite_in_connection(conn: &Connection, label: &str, target: &str, pane: i64) -> Result<i64, Box<dyn Error>> {
     let target = target.trim();
     if target.is_empty() {
         return Err("URLまたはファイルパスを入力してください。".into());
     }
-    let conn = Connection::open(db_path()?)?;
     let duplicate: Option<i64> = conn.query_row("SELECT id FROM favorite_items WHERE lower(target)=lower(?1) AND deleted_at IS NULL LIMIT 1", params![target], |r| r.get(0)).optional()?;
     if duplicate.is_some() {
         return Err("そのリンクはすでにお気に入り登録済みです。".into());
@@ -2972,7 +3002,8 @@ pub fn add_manual_favorite(label: &str, target: &str, pane: i64) -> Result<i64, 
         .and_then(|v| v.to_str())
         .filter(|v| !v.is_empty())
         .unwrap_or(target);
-    conn.execute("INSERT INTO favorite_items(kind,label,target,service,pane,position) SELECT 'link',?1,?2,?3,?4,COALESCE(MAX(position),-1)+1 FROM favorite_items WHERE pane=?4", params![if label.trim().is_empty(){fallback}else{label.trim()},target,service,pane.max(1)])?;
+    let title = clean_favorite_title(if label.trim().is_empty(){fallback}else{label.trim()},&blocked_words_for_connection(conn)?);
+    conn.execute("INSERT INTO favorite_items(kind,label,target,service,pane,position) SELECT 'link',?1,?2,?3,?4,COALESCE(MAX(position),-1)+1 FROM favorite_items WHERE pane=?4", params![title,target,service,pane.max(0)])?;
     Ok(conn.last_insert_rowid())
 }
 
@@ -3010,6 +3041,7 @@ pub fn toggle_file_favorite(path: &str, name: &str) -> Result<bool, Box<dyn Erro
         delete_favorite_item(id)?;
         return Ok(false);
     }
+    let name = clean_favorite_title(&name,&blocked_words_for_connection(&conn)?);
     conn.execute("INSERT INTO favorite_items (kind, label, target, service, pane, position) SELECT 'link', ?1, ?2, 'folder', 0, COALESCE(MAX(position), -1) + 1 FROM favorite_items WHERE pane = 0", params![name, path])?;
     Ok(true)
 }
@@ -3143,6 +3175,12 @@ pub fn prepare_favorite_board() -> Result<String, Box<dyn Error>> {
         conn.execute("VACUUM INTO ?1", params![backup.to_string_lossy().to_string()])?;
         migrate_board_containers(&mut conn)?;
     }
+    let cleaned: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM app_meta WHERE key='stored_clean_titles')",[],|r|r.get(0))?;
+    if !cleaned {
+        let backup = db_path()?.with_extension(format!("before-title-cleanup-{}.db",Local::now().format("%Y%m%d%H%M%S")));
+        conn.execute("VACUUM INTO ?1",params![backup.to_string_lossy().to_string()])?;
+        migrate_stored_titles(&mut conn)?;
+    }
     Ok(conn.query_row("SELECT value FROM app_meta WHERE key='board_layout'",[],|r|r.get(0)).optional()?.unwrap_or_else(|| "{}".into()))
 }
 
@@ -3207,6 +3245,23 @@ pub fn save_board_layout(value: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UiPreferences {
+    pub show_favorite_search: bool,
+    pub reset_tab_after_link: bool,
+}
+impl Default for UiPreferences {
+    fn default() -> Self { Self { show_favorite_search: true, reset_tab_after_link: false } }
+}
+pub fn get_ui_preferences() -> Result<UiPreferences, Box<dyn Error>> {
+    let value: Option<String> = Connection::open(db_path()?)?.query_row("SELECT value FROM app_meta WHERE key='ui_preferences'",[],|r|r.get(0)).optional()?;
+    Ok(match value { Some(value) => serde_json::from_str(&value)?, None => UiPreferences::default() })
+}
+pub fn save_ui_preferences(value: UiPreferences) -> Result<(), Box<dyn Error>> {
+    Connection::open(db_path()?)?.execute("INSERT INTO app_meta(key,value) VALUES('ui_preferences',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![serde_json::to_string(&value)?])?;
+    Ok(())
+}
 pub fn open_edge_extensions() -> Result<(), Box<dyn Error>> {
     let executable = resolve_edge_executable()?;
     let mut command = Command::new(executable);
@@ -3362,6 +3417,20 @@ pub fn place_favorite_columns(tab_id: i64, ids: &[i64]) -> Result<(), Box<dyn Er
     }
     tx.commit()?;
     Ok(())
+}
+pub fn delete_favorite_group(id: i64) -> Result<usize,Box<dyn Error>> {
+    let mut conn=Connection::open(db_path()?)?;
+    delete_favorite_group_in_connection(&mut conn,id)
+}
+fn delete_favorite_group_in_connection(conn: &mut Connection,id:i64) -> Result<usize,Box<dyn Error>> {
+    let tx=conn.transaction()?;
+    let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM favorite_columns WHERE id=?1)",params![id],|r|r.get(0))?;
+    if !exists{return Err("グループが見つかりません。".into());}
+    tx.execute("UPDATE history SET is_favorite=0 WHERE lower(url) IN (SELECT lower(target) FROM favorite_items WHERE pane=?1 AND deleted_at IS NULL)",params![id])?;
+    let count=tx.execute("UPDATE favorite_items SET deleted_at=?1 WHERE pane=?2 AND deleted_at IS NULL",params![now_string(),id])?;
+    tx.execute("DELETE FROM favorite_columns WHERE id=?1",params![id])?;
+    tx.commit()?;
+    Ok(count)
 }
 pub fn delete_favorite_column(id: i64, target_pane: i64) -> Result<(), Box<dyn Error>> {
     let mut conn = Connection::open(db_path()?)?;
@@ -4126,8 +4195,8 @@ mod board_tests {
     fn fixture() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE app_meta(key TEXT PRIMARY KEY,value TEXT);
-            CREATE TABLE settings(left_pane_percent INTEGER);
-            INSERT INTO settings VALUES(50);
+            CREATE TABLE settings(id INTEGER PRIMARY KEY,left_pane_percent INTEGER,blocked_words TEXT,site_names TEXT);
+            INSERT INTO settings VALUES(1,50,'[]','[]');
             CREATE TABLE favorite_tabs(id INTEGER PRIMARY KEY,name TEXT);
             CREATE TABLE favorite_columns(id INTEGER PRIMARY KEY,tab_id INTEGER,name TEXT,color TEXT,position INTEGER);
             CREATE TABLE favorite_items(id INTEGER PRIMARY KEY,kind TEXT,label TEXT,color TEXT,pane INTEGER,position INTEGER,deleted_at TEXT,target TEXT,service TEXT);
@@ -4144,6 +4213,41 @@ mod board_tests {
         conn
     }
 
+    #[test]
+    fn deleting_group_deletes_all_contents_without_moving_or_affecting_other_groups() {
+        let mut conn=fixture();
+        conn.execute_batch("CREATE TABLE history(url TEXT,is_favorite INTEGER); INSERT INTO history VALUES('https://first.test',1),('https://other.test',1); INSERT INTO favorite_columns VALUES(2,1,'別グループ','#fff',1); INSERT INTO favorite_items VALUES(20,'link','別リンク','#fff',2,0,NULL,'https://other.test','edge');").unwrap();
+        assert_eq!(delete_favorite_group_in_connection(&mut conn,1).unwrap(),6);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM favorite_items WHERE pane=1 AND deleted_at IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM favorite_items WHERE pane=0",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM favorite_items WHERE id=20 AND deleted_at IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(conn.query_row("SELECT is_favorite FROM history WHERE url='https://first.test'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(conn.query_row("SELECT is_favorite FROM history WHERE url='https://other.test'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert!(delete_favorite_group_in_connection(&mut conn,1).is_err());
+    }
+    #[test]
+    fn titles_are_stored_clean_and_old_sites_migrate_without_losing_targets() {
+        let mut conn=fixture();
+        conn.execute("UPDATE settings SET blocked_words='[\"不要\"]',site_names='[\"Notion\"]'",[]).unwrap();
+        let id=add_manual_favorite_in_connection(&conn,"不要 - 工程表 - NOTION","https://clean.test",0).unwrap();
+        assert_eq!(conn.query_row("SELECT label FROM favorite_items WHERE id=?1",params![id],|r|r.get::<_,String>(0)).unwrap(),"工程表 NOTION");
+        migrate_stored_titles(&mut conn).unwrap();
+        assert_eq!(conn.query_row("SELECT label FROM favorite_items WHERE id=?1",params![id],|r|r.get::<_,String>(0)).unwrap(),"工程表");
+        assert_eq!(conn.query_row("SELECT target FROM favorite_items WHERE id=?1",params![id],|r|r.get::<_,String>(0)).unwrap(),"https://clean.test");
+        assert_eq!(clean_favorite_title("不要",&["不要".into()]),"名称未設定");
+    }
+    #[test]
+    fn manual_favorites_stay_in_search_inbox_and_preferences_roundtrip() {
+        let conn = fixture();
+        let id = add_manual_favorite_in_connection(&conn,"手動リンク","https://manual.test",0).unwrap();
+        assert_eq!(conn.query_row("SELECT pane FROM favorite_items WHERE id=?1",params![id],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert!(add_manual_favorite_in_connection(&conn,"重複","https://manual.test",0).is_err());
+        let preferences = UiPreferences {show_favorite_search:false,reset_tab_after_link:true};
+        let loaded: UiPreferences = serde_json::from_str(&serde_json::to_string(&preferences).unwrap()).unwrap();
+        assert!(!loaded.show_favorite_search && loaded.reset_tab_after_link);
+        let defaults: UiPreferences = serde_json::from_str("{}").unwrap();
+        assert!(defaults.show_favorite_search && !defaults.reset_tab_after_link);
+    }
     #[test]
     fn headings_become_containers_without_losing_links_and_migration_is_idempotent() {
         let mut conn = fixture();

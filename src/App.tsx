@@ -7,6 +7,8 @@ import "./board.css";
 import FavoriteBoard from "./FavoriteBoard";
 
 type ServiceType = "spo" | "asana" | "notion" | "edge" | "folder";
+type UiPreferences = { showFavoriteSearch: boolean; resetTabAfterLink: boolean };
+const defaultUiPreferences: UiPreferences = {showFavoriteSearch:true,resetTabAfterLink:false};
 
 type SearchResult = {
   id: number;
@@ -117,49 +119,13 @@ function SourceIcon({ src, service }: { src?: string; service: ServiceType }) {
     : <ServiceDot service={service} />;
 }
 
-function processTitleForDisplay(title: string, blockedWords: string[], siteNames: string[]) {
-  if (!title) return { displayTitle: "", displaySite: null as string | null };
-
-  let processed = title;
-  for (const blockedWord of blockedWords || []) {
-    if (!blockedWord) continue;
-    const escaped = blockedWord.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    try {
-      processed = processed.replace(new RegExp(escaped, "gi"), "");
-    } catch {
-      processed = processed.split(blockedWord).join("");
-    }
+function processTitleForDisplay(title: string, blockedWords: string[]) {
+  let display=title;
+  for(const word of blockedWords || []) {
+    if(word) display=display.replace(new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),"gi"),"");
   }
-
-  let foundSite: string | null = null;
-  if (siteNames && siteNames.length) {
-    const ordered = [...siteNames].filter(Boolean).sort((a, b) => b.length - a.length);
-    const lower = processed.toLowerCase();
-    for (const site of ordered) {
-      const trimmed = site.trim();
-      if (trimmed && lower.includes(trimmed.toLowerCase())) {
-        foundSite = trimmed;
-        break;
-      }
-    }
-  }
-
-  let display = processed;
-  if (foundSite) {
-    const escapedSite = foundSite.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    try {
-      display = display.replace(new RegExp(escapedSite, "gi"), "");
-    } catch {
-      display = display.split(foundSite).join("");
-    }
-  }
-
-  display = display.replace(/^[\s\-_:–—]+/, "");
-  display = display.replace(/[\s\-_:–—]+$/, "");
-  display = display.replace(/[\s\-_:–—]{2,}/g, " ");
-  display = display.trim();
-
-  return { displayTitle: display, displaySite: foundSite };
+  display=display.replace(/^[\s\-_:–—]+|[\s\-_:–—]+$/g,"").replace(/[\s\-_:–—]{2,}/g," ").trim();
+  return {displayTitle:display || "名称未設定"};
 }
 
 function SettingHelp({ text }: { text: string }) {
@@ -277,7 +243,7 @@ function parseLegacyLocalStorageSettings(): Settings | null {
   }
 }
 
-function sanitizeSettingsForSave(settings: Settings, quickKeywordsText: string, blockedWordsText: string, siteNamesText: string): Settings {
+function sanitizeSettingsForSave(settings: Settings, quickKeywordsText: string, blockedWordsText: string): Settings {
   const quickKeywords = quickKeywordsText
     .split("\n")
     .map((value) => value.trim())
@@ -287,29 +253,24 @@ function sanitizeSettingsForSave(settings: Settings, quickKeywordsText: string, 
     .split("\n")
     .map((value) => value.trim())
     .filter(Boolean)
-    .slice(0, 100);
-  const siteNames = siteNamesText
-    .split("\n")
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .slice(0, 100);
+    .slice(0, 200);
 
   return {
     displayCount: Math.max(0, Math.min(20, settings.displayCount)),
     quickKeywords: quickKeywords.length ? quickKeywords : defaultQuickKeywords,
     blockedWords,
-    siteNames,
+    siteNames: [],
     searchMode: settings.searchMode,
     windowSize: settings.windowSize,
     indexFolders: settings.indexFolders.map((v) => v.trim()).filter(Boolean).slice(0, 10),
     favoritePaneCount: Math.max(1, Math.min(10, settings.favoritePaneCount)),
-    leftPanePercent: Math.max(30, Math.min(75, settings.leftPanePercent)),
+leftPanePercent: Math.max(15, Math.min(75, settings.leftPanePercent)),
     favoriteDensity: settings.favoriteDensity,
     favoriteTabLimit: Math.max(1,Math.min(20,settings.favoriteTabLimit)),
     headingDefaultColor: /^#[0-9a-f]{6}$/i.test(settings.headingDefaultColor) ? settings.headingDefaultColor : "#dbeafe",
     headingPaletteSize: settings.headingPaletteSize === 64 || settings.headingPaletteSize === 128 ? settings.headingPaletteSize : 32,
     edgeSyncIntervalSeconds: Math.max(10, Math.min(3600, settings.edgeSyncIntervalSeconds)),
-    folderSyncIntervalSeconds: Math.max(30, Math.min(86400, settings.folderSyncIntervalSeconds)),
+    folderSyncIntervalSeconds: Math.max(15, Math.min(86400, settings.folderSyncIntervalSeconds)),
   };
 }
 
@@ -325,7 +286,6 @@ function App() {
   const [persistedSettings, setPersistedSettings] = useState<Settings>(defaultSettings);
   const [quickKeywordsText, setQuickKeywordsText] = useState(defaultSettings.quickKeywords.join("\n"));
   const [blockedWordsText, setBlockedWordsText] = useState("");
-  const [siteNamesText, setSiteNamesText] = useState("");
   const [settingsSaving, setSettingsSaving] = useState(false);
 
   const [favoriteItems, setFavoriteItems] = useState<FavoriteItem[]>([]);
@@ -339,6 +299,12 @@ function App() {
   const [manualFavoriteOpen,setManualFavoriteOpen]=useState(false);
   const [manualFavoriteName,setManualFavoriteName]=useState("");
   const [manualFavoriteTarget,setManualFavoriteTarget]=useState("");
+  const [organizing,setOrganizing]=useState(false);
+  const [uiPreferences,setUiPreferences]=useState(defaultUiPreferences);
+  const [persistedUiPreferences,setPersistedUiPreferences]=useState(defaultUiPreferences);
+  const navigationPendingRef=useRef(false);
+  const tabResetRef=useRef({enabled:false,firstTab:1});
+  tabResetRef.current={enabled:persistedUiPreferences.resetTabAfterLink,firstTab:favoriteTabs[0]?.id??1};
   const [fileResults, setFileResults] = useState<FileSearchResult[]>([]);
   const [webIcons,setWebIcons]=useState<Record<string,string>>({});
   const [fileIcons,setFileIcons]=useState<Record<string,string>>({});
@@ -346,7 +312,7 @@ function App() {
   const [indexMessage, setIndexMessage] = useState("");
   const [editingFavoriteId, setEditingFavoriteId] = useState<number | null>(null);
   const [draggingFavoriteId, setDraggingFavoriteId] = useState<number | null>(null);
-  const [favoriteDragPreview, setFavoriteDragPreview] = useState<{ x: number; y: number; pane: number; beforeId?: number } | null>(null);
+  const [favoriteDragPreview, setFavoriteDragPreview] = useState<{ x: number; y: number; pane: number; beforeId?: number; lineX?:number; lineY?:number; lineWidth?:number } | null>(null);
   const [draggingColumnId,setDraggingColumnId]=useState<number|null>(null);
   const draggingColumnRef=useRef<number|null>(null);
   const [draggingTabId,setDraggingTabId]=useState<number|null>(null);
@@ -392,7 +358,6 @@ function App() {
   const syncSettingsBuffers = (nextSettings: Settings) => {
     setQuickKeywordsText(nextSettings.quickKeywords.join("\n"));
     setBlockedWordsText(nextSettings.blockedWords.join("\n"));
-    setSiteNamesText(nextSettings.siteNames.join("\n"));
     setIndexFoldersText(nextSettings.indexFolders.join("\n"));
   };
 
@@ -401,7 +366,13 @@ function App() {
     setResults(history);
   };
 
-  const loadFavorites = async () => setFavoriteItems(await invoke<FavoriteItem[]>("list_favorite_items"));
+  const loadFavorites = async () => {
+    const items=await invoke<FavoriteItem[]>("list_favorite_items");
+    setFavoriteItems(items);
+    const targets=new Set(items.filter(item=>item.kind==='link').map(item=>item.target?.toLowerCase()));
+    setResults(current=>current.map(item=>({...item,isFavorite:targets.has(item.url.toLowerCase())?1:0})));
+    setFileResults(current=>current.map(item=>({...item,isFavorite:targets.has(item.path.toLowerCase())})));
+  };
   const loadFavoriteLayout = async () => {
     const [tabs, columns] = await Promise.all([invoke<FavoriteTab[]>("list_favorite_tabs"), invoke<FavoriteColumn[]>("list_favorite_columns")]);
     setFavoriteTabs(tabs); setFavoriteColumns(columns); setActiveTabId((current) => tabs.some((tab) => tab.id === current) ? current : (tabs[0]?.id ?? 1));
@@ -429,6 +400,8 @@ function App() {
     const initialize = async () => {
       try {
         await invoke('prepare_favorite_board');
+        const ui = await invoke<UiPreferences>('get_ui_preferences');
+        setUiPreferences(ui); setPersistedUiPreferences(ui);
         setFileFilter(await invoke<string>('get_file_filter'));
         const response = await invoke<SettingsResponse>("get_settings");
         let nextSettings = response.settings;
@@ -510,7 +483,7 @@ function App() {
 
   useEffect(() => {
     if (!fileIndexReady || settings.indexFolders.length === 0) return;
-    const id = window.setInterval(() => { void invoke("rebuild_file_index", { folders: settings.indexFolders }); }, Math.max(30, settings.folderSyncIntervalSeconds) * 1000);
+    const id = window.setInterval(() => { void invoke("rebuild_file_index", { folders: settings.indexFolders }); }, Math.max(15, settings.folderSyncIntervalSeconds) * 1000);
     return () => window.clearInterval(id);
   }, [fileIndexReady, settings.indexFolders, settings.folderSyncIntervalSeconds]);
 
@@ -539,7 +512,7 @@ function App() {
   const loadAppLogs = async () => setAppLogs(await invoke<AppLogEntry[]>("get_app_logs"));
   const filteredResults = useMemo(() => results, [results]);
   const headingColors = useMemo(() => createHeadingColors(settings.headingPaletteSize), [settings.headingPaletteSize]);
-  const favoriteDisplayLabel = (item: FavoriteItem) => item.kind === "link" ? (processTitleForDisplay(item.label, settings.blockedWords, settings.siteNames).displayTitle || item.label) : item.label;
+  const favoriteDisplayLabel = (item: FavoriteItem) => item.label;
   const favoriteIcon = (item:FavoriteItem) => { if(!item.target)return undefined;if(item.service!=="folder")return webIcons[item.target] ?? websiteFaviconUrl(item.target);const name=item.target.split(/[\\/]/).pop()??"";const ext=name.includes(".")?name.split(".").pop()!.toLowerCase():"";return fileIcons[ext]; };
   const activeResultCount = settings.searchMode === "web" ? filteredResults.length : fileResults.length;
 
@@ -605,7 +578,7 @@ function App() {
         if (item) {
           setSelectedResult(item);
           setActionMessage(`「${item.title}」を選択しました。`);
-          invoke("open_url", { url: item.url })
+openWebLink(item.url)
             .then(() => {
               try {
                 void getCurrentWindow().hide();
@@ -651,6 +624,7 @@ function App() {
   };
 
   const openSettings = () => {
+    setUiPreferences(persistedUiPreferences);
     setSettings(persistedSettings);
     syncSettingsBuffers(persistedSettings);
     setSettingsOpen(true);
@@ -661,13 +635,14 @@ function App() {
       settings,
       quickKeywordsText,
       blockedWordsText,
-      siteNamesText,
     );
     nextSettings.indexFolders = indexFoldersText.split("\n").map((v) => v.trim()).filter(Boolean).slice(0, 10);
 
     setSettingsSaving(true);
     try {
       const saved = await invoke<Settings>("save_settings", { settings: nextSettings });
+      await invoke('save_ui_preferences',{preferences:uiPreferences});
+      setPersistedUiPreferences(uiPreferences);
       setSettings(saved);
       setPersistedSettings(saved);
       syncSettingsBuffers(saved);
@@ -686,6 +661,7 @@ function App() {
   };
 
   const cancelSettings = () => {
+    setUiPreferences(persistedUiPreferences);
     setSettings(persistedSettings);
     syncSettingsBuffers(persistedSettings);
     setSettingsOpen(false);
@@ -711,8 +687,24 @@ function App() {
       });
   };
   const routeNewFavorite = async (_target: string) => { /* New links remain in the search-side inbox. */ };
+  const openWebLink = (url: string) => {
+    navigationPendingRef.current=true;
+    return invoke('open_url',{url}).catch(error=>{navigationPendingRef.current=false;throw error;});
+  };
+  useEffect(()=>{
+    let disposed=false;
+    let unlisten: (()=>void)|undefined;
+    void getCurrentWindow().onFocusChanged(event=>{
+      if(event.payload && navigationPendingRef.current){
+        navigationPendingRef.current=false;
+        if(tabResetRef.current.enabled) setActiveTabId(tabResetRef.current.firstTab);
+      }
+    }).then(stop=>{if(disposed)stop();else unlisten=stop;});
+    return ()=>{disposed=true;unlisten?.();};
+  },[]);
   const openLocalPathAndHide = async (path: string) => {
     await invoke("open_local_path", { path });
+    navigationPendingRef.current=true;
     try { await new Promise((resolve) => window.setTimeout(resolve, 100)); await getCurrentWindow().hide(); } catch { /* path is already open */ }
   };
 
@@ -743,15 +735,21 @@ function App() {
   };
   const favoriteDropTargetAtPoint = (clientX: number, clientY: number) => {
     const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-    const paneElement = target?.closest<HTMLElement>("[data-favorite-pane]");
-    const pane = Number(paneElement?.dataset.favoritePane);
-    const cardElement = target?.closest<HTMLElement>("[data-favorite-id]");
-    const beforeId = cardElement && paneElement?.contains(cardElement) ? Number(cardElement.dataset.favoriteId) : undefined;
-    return { pane, beforeId };
+    let paneElement = target?.closest<HTMLElement>("[data-favorite-pane]");
+    if(!paneElement){const column=target?.closest<HTMLElement>('[data-board-column]');const groups=column?.querySelectorAll<HTMLElement>('[data-favorite-pane]');paneElement=groups?.length?groups[groups.length-1]:undefined;}
+    if(!paneElement)return {pane:NaN};
+    const pane=Number(paneElement.dataset.favoritePane);
+    const cards=Array.from(paneElement.querySelectorAll<HTMLElement>('[data-favorite-id]')).filter(card=>Number(card.dataset.favoriteId)!==draggingFavoriteId);
+    const before=cards.find(card=>{const rect=card.getBoundingClientRect();return clientY<rect.top+rect.height/2;});
+    const list=paneElement.querySelector<HTMLElement>('.favorites-list')??paneElement;
+    const rect=list.getBoundingClientRect();
+    const last=cards[cards.length-1]?.getBoundingClientRect();
+    const lineY=before?before.getBoundingClientRect().top:(last?.bottom??rect.bottom-3);
+    return {pane,beforeId:before?Number(before.dataset.favoriteId):undefined,lineX:rect.left+3,lineWidth:Math.max(8,rect.width-6),lineY:Math.max(4,Math.min(window.innerHeight-6,lineY))};
   };
   const trackFavoriteDrag = (_id: number, clientX: number, clientY: number) => {
     const target = favoriteDropTargetAtPoint(clientX, clientY);
-    setFavoriteDragPreview({ x: clientX, y: clientY, pane: target.pane, beforeId: target.beforeId });
+    setFavoriteDragPreview({ x: clientX, y: clientY, ...target });
   };
   const dropFavoriteAtPoint = (id: number, clientX: number, clientY: number) => {
     const target = favoriteDropTargetAtPoint(clientX, clientY);
@@ -763,7 +761,7 @@ function App() {
   const applyHeadingColorToAll = async () => { await invoke("set_all_heading_colors", { color: settings.headingDefaultColor }); setFavoriteItems((items) => items.map((item) => item.kind === "heading" ? { ...item, color: settings.headingDefaultColor } : item)); await loadFavoriteLayout(); showToast("すべてのグループを同じ色に変更しました"); };
   const beginPaneResize = (event: ReactMouseEvent) => {
     event.preventDefault(); const container = appContainerRef.current; if (!container) return;
-    const move = (e: MouseEvent) => { const rect = container.getBoundingClientRect(); const percent = Math.max(30, Math.min(75, ((e.clientX - rect.left) / rect.width) * 100)); setSettings((current) => ({ ...current, leftPanePercent: Math.round(percent) })); };
+    const move = (e: MouseEvent) => { const rect = container.getBoundingClientRect(); const percent = Math.max(15, Math.min(75, ((e.clientX - rect.left) / rect.width) * 100)); setSettings((current) => ({ ...current, leftPanePercent: Math.round(percent) })); };
     const up = async () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); setSettings((current) => { const next = { ...current }; setPersistedSettings(next); void invoke("save_settings", { settings: next }); return next; }); };
     window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
   };
@@ -796,17 +794,17 @@ function App() {
     if (!item.target) return;
     void invoke("record_favorite_open", { id:item.id });
     setFavoriteItems((items) => items.map((value) => value.id === item.id ? {...value, openedCount:(value.openedCount ?? 0)+1, lastOpenedAt:new Date().toISOString()} : value));
-    if (item.service === "folder") void openLocalPathAndHide(item.target); else { hideToTray(); void invoke("open_url", { url: item.target }); }
+    if (item.service === "folder") void openLocalPathAndHide(item.target); else { hideToTray(); void openWebLink(item.target).catch(error=>showToast(`開けませんでした: ${error}`)); }
   };
   const activeColumns = favoriteColumns.filter((column) => column.tabId === activeTabId);
   const addTab = async () => { try { const id=await invoke<number>("add_favorite_tab",{limit:settings.favoriteTabLimit}); await loadFavoriteLayout(); setActiveTabId(id); } catch(error){showToast(String(error));} };
-  const addColumn = async () => { try { const id=await invoke<number>("add_favorite_column", {tabId:activeTabId,limit:settings.favoritePaneCount}); await invoke("update_favorite_column",{id,name:"新しいグループ",color:settings.headingDefaultColor}); await loadFavoriteLayout(); } catch(error){showToast(String(error));} };
+
   const favoriteLocation = (item:FavoriteItem) => { const column=favoriteColumns.find((value)=>value.id===item.pane);const tab=favoriteTabs.find((value)=>value.id===column?.tabId);return `${tab?.name??"不明なタブ"} の ${column?.name??"追加されたお気に入り"}`; };
   const submitManualFavorite = async()=>{
     const target=manualFavoriteTarget.trim();const duplicate=favoriteItems.find((item)=>item.target?.trim().toLowerCase()===target.toLowerCase());
     if(duplicate){showToast(`そのリンクはすでにお気に入り登録済みです。${favoriteLocation(duplicate)} にあります。`);return;}
     const pane=0;
-    try{await invoke("add_manual_favorite",{label:manualFavoriteName,target,pane});await routeNewFavorite(target);await loadFavorites();setManualFavoriteOpen(false);setManualFavoriteName("");setManualFavoriteTarget("");showToast("お気に入りに保存しました。");}catch(error){showToast(String(error));}
+    try{await invoke("add_manual_favorite",{label:manualFavoriteName,target,pane});await routeNewFavorite(target);await loadFavorites();setManualFavoriteOpen(false);setManualFavoriteName("");setManualFavoriteTarget("");showToast("検索下の「追加されたお気に入り」に保存しました。");}catch(error){showToast(String(error));}
   };
   const editTab = async (tab:FavoriteTab, color=tab.color) => { const name=window.prompt("タブ名を入力してください",tab.name); if(name===null)return; await invoke("update_favorite_tab",{id:tab.id,name,color}); await loadFavoriteLayout(); };
   const setTabColor = async(tab:FavoriteTab,color:string)=>{await invoke("update_favorite_tab",{id:tab.id,name:tab.name,color});await loadFavoriteLayout();setContextMenu(null);};
@@ -880,11 +878,12 @@ function App() {
           <div className="search-card">
             <div className="header-block">
               <div className="window-label">検索</div>
+              <div className="top-right-controls"><button className="settings-button" onClick={openSettings}>設定</button></div>
+            </div>
               <div className="search-mode-switch">
                 <button className={settings.searchMode === "web" ? "active" : ""} onClick={() => void setSearchMode("web")}>Web</button>
                 <button className={settings.searchMode === "folder" ? "active" : ""} onClick={() => void setSearchMode("folder")}>フォルダ</button>
               </div>
-            </div>
 
             <div className="search-panel">
               <input
@@ -909,11 +908,6 @@ function App() {
                 ))}
               </div> : null}
 
-              <div className="top-right-controls">
-                <button className="settings-button" onClick={openSettings}>
-                  設定
-                </button>
-              </div>
 
               {settingsOpen && (
                 <div className="settings-modal-backdrop">
@@ -936,16 +930,18 @@ function App() {
                             <label><span>Quickボタン数 <SettingHelp text="検索欄の上に表示する検索ショートカットの数です。0にするとQuickボタンの領域ごと非表示になり、検索欄を広く使えます。" /></span><input type="number" min={0} max={20} value={settings.displayCount} onChange={(e)=>setSettings({...settings,displayCount:Number(e.target.value)})}/></label>
                             <label><span>アプリサイズ <SettingHelp text="起動時に復元するアプリの大きさです。設定画面の全項目を見切れず表示できるよう、最小サイズは1100 × 760です。ウィンドウをマウスで直接リサイズした場合は「カスタム」として、その大きさを次回も復元します。" /></span><select value={presetWindowSizes.includes(settings.windowSize) ? settings.windowSize : "custom"} onChange={(e)=>{if(e.target.value!=="custom")setSettings({...settings,windowSize:e.target.value});}}><option value="1100x760">1100 × 760</option><option value="1200x800">1200 × 800</option><option value="1280x840">1280 × 840</option><option value="1360x900">1360 × 900</option><option value="custom">カスタム</option></select></label>
                             <div className="current-size-display"><span>現在のサイズ</span><strong>{currentWindowSize.replace("x"," × ")}</strong></div>
+                            <label className="ui-preference"><span>お気に入り検索を表示 <SettingHelp text="お気に入りペインの検索欄を表示します。非表示にすると検索による絞り込みも解除され、現在のタブのすべてのお気に入りが表示されます。設定は再起動後も保持されます。" /></span><input type="checkbox" checked={uiPreferences.showFavoriteSearch} onChange={e=>setUiPreferences({...uiPreferences,showFavoriteSearch:e.target.checked})}/></label>
+                            <label className="ui-preference"><span>リンクを開いた後は先頭タブ <SettingHelp text="Webページやフォルダを開いてアプリが隠れた後、再表示すると一番左のタブへ戻ります。オフの場合は使っていたタブを保持します。Escなどで隠しただけの場合はタブを変更しません。" /></span><input type="checkbox" checked={uiPreferences.resetTabAfterLink} onChange={e=>setUiPreferences({...uiPreferences,resetTabAfterLink:e.target.checked})}/></label>
                             <label><span>グループの初期色 <SettingHelp text="新しく作るグループの識別色です。既存のグループは自動では変わりません。「全グループに適用」を押した場合だけ、既存のグループもこの色に揃えます。" /></span><div className="heading-default-control"><input type="color" value={settings.headingDefaultColor} onChange={(e)=>setSettings({...settings,headingDefaultColor:e.target.value})}/><button type="button" onClick={()=>void applyHeadingColorToAll()}>全グループに適用</button></div></label>
                             <label><span>グループの色数 <SettingHelp text="各グループの設定メニューに表示する色の候補数です。32色は薄め中心、64色と128色では濃い色も段階的に追加されます。" /></span><select value={settings.headingPaletteSize} onChange={(e)=>setSettings({...settings,headingPaletteSize:Number(e.target.value) as 32|64|128})}><option value={32}>32色</option><option value={64}>64色</option><option value={128}>128色</option></select></label>
                           </div>
                         </section>
 
                         <section className="settings-section">
-                          <div className="settings-section-title"><div><strong>ページ名の整形</strong><small>検索結果とお気に入りの表示名だけを読みやすくします</small></div></div>
+<div className="settings-section-title"><div><strong>ページ名の整形</strong><small>検索結果の表示と、お気に入り登録時の名前を整えます</small></div></div>
                           <div className="cleanup-settings-grid">
-                            <label><span>不要語 <SettingHelp text="ページ名から表示上だけ取り除きたい文字を、1行に1つ入力します。元の履歴やお気に入りデータは書き換えません。会社共通の長い文言などを登録すると見やすくなります。最大100件です。" /></span><textarea rows={3} value={blockedWordsText} onChange={(e)=>setBlockedWordsText(e.target.value)}/></label>
-                            <label><span>サイト名 <SettingHelp text="ページ名の中からサイト名として分離したい文字を、1行に1つ入力します。一致した文字はページ名から外して扱うため、文書名やページ名が短く見やすくなります。最大100件です。" /></span><textarea rows={3} value={siteNamesText} onChange={(e)=>setSiteNamesText(e.target.value)}/></label>
+                            <label><span>不要語 <SettingHelp text="名前から取り除く語を1行に1つ登録します。検索結果は表示のみを整形します。お気に入りは登録時に取り除いた名前を保存し、編集欄にもその名前を表示します。登録後に不要語を追加しても既存の名前は自動変更しません。最大200件です。" /></span><textarea rows={3} value={blockedWordsText} onChange={(e)=>setBlockedWordsText(e.target.value)}/></label>
+
                           </div>
                         </section>
 
@@ -969,7 +965,7 @@ function App() {
                           <textarea rows={6} value={quickKeywordsText} onChange={(e)=>setQuickKeywordsText(e.target.value)}/>
                         </section>
                         <section className="settings-section data-tools-section">
-<div className="settings-section-title"><div><strong>バックアップと診断</strong><small>お気に入り・レイアウト・設定を安全に保管します</small></div><span className="app-version">v0.3.1</span></div>
+<div className="settings-section-title"><div><strong>バックアップと診断</strong><small>お気に入り・レイアウト・設定を安全に保管します</small></div><span className="app-version">v0.3.4</span></div>
                           <div className="data-tool-actions"><button type="button" title="現在のDBを整合性のある状態で1ファイルへ保存します。お気に入り、タブ、列、色、設定をすべて含みます。" onClick={async()=>{const path=await invoke<string|null>("create_backup");if(path)showToast(`バックアップを保存しました: ${path}`);}}>バックアップ作成</button><button type="button" title="バックアップから復元します。復元直前の現在DBも自動退避し、完了後に画面を再読み込みします。" onClick={async()=>{if(!confirm("バックアップから復元しますか？"))return;const path=await invoke<string|null>("restore_backup");if(path)window.location.reload();}}>復元</button><button type="button" title="個人のURLやファイル名を含まない診断概要をクリップボードへコピーします。" onClick={async()=>{const value=await invoke<string>("diagnostics_text");await navigator.clipboard.writeText(value);showToast("診断情報をコピーしました");}}>診断情報をコピー</button></div>
                         </section>
                         <div className="edge-import-debug app-log-panel">
@@ -1032,7 +1028,7 @@ function App() {
                         setSelectedIndex(index);
                         setSelectedResult(result);
                         setActionMessage(`「${result.title}」を選択しました。`);
-                        invoke("open_url", { url: result.url })
+                        openWebLink(result.url)
                           .then(() => {
                             try {
                               void getCurrentWindow().hide();
@@ -1050,15 +1046,14 @@ function App() {
                         <div className="result-title-row">
                           <SourceIcon src={webIcons[result.url] ?? websiteFaviconUrl(result.url)} service={result.service} />
                           {(() => {
-                            const { displayTitle, displaySite } = processTitleForDisplay(
+                            const { displayTitle } = processTitleForDisplay(
                               result.title || "",
                               settings.blockedWords,
-                              settings.siteNames,
                             );
                             return (
                               <>
                                 <div className="result-title">{displayTitle || result.title}</div>
-                                <div className="site-name">{displaySite ?? result.site ?? ""}</div>
+                                <div className="site-name">{result.site ?? ""}</div>
                               </>
                             );
                           })()}
@@ -1076,7 +1071,7 @@ function App() {
               )}
             </div>
             {settings.searchMode === 'web' && <div className={`edge-connection-banner ${extensionConnection.connected ? 'connected' : ''}`}><span>{extensionConnection.connected ? 'Edge連携中' : 'Edge連携の応答がありません'}{extensionConnection.lastContact && <small>最終受信 {extensionConnection.lastContact}</small>}</span><button onClick={() => void invoke<ExtensionConnectionStatus>('extension_connection_status').then(setExtensionConnection)}>接続確認</button><button onClick={() => void invoke('open_edge_extensions')}>拡張機能を確認</button></div>}
-            <section className={`search-inbox density-${settings.favoriteDensity}`} data-favorite-pane="0"><header>追加されたお気に入り <span>{favoriteItems.filter(item=>item.pane===0 && item.kind==='link').length}</span></header><div className="favorites-list">{favoriteItems.filter(item=>item.pane===0 && item.kind==='link').map(item=><FavoriteCard key={item.id} item={item} displayLabel={favoriteDisplayLabel(item)} iconSrc={favoriteIcon(item)} headingColors={headingColors} editing={editingFavoriteId===item.id} onDragStart={setDraggingFavoriteId} onPointerMove={trackFavoriteDrag} onPointerDrop={dropFavoriteAtPoint} onEdit={setEditingFavoriteId} onSave={saveFavoriteLabel} onDelete={removeFavorite} onOpen={openFavoriteTarget} onDropBefore={(dragId,beforeId)=>void moveFavorite(dragId,0,beforeId)} onColor={changeHeadingColor} draggingId={draggingFavoriteId} selectionMode={false} selected={false} onToggleSelect={()=>{}} />)}</div></section>
+            <section className={`search-inbox density-${settings.favoriteDensity}`} data-favorite-pane="0"><header>追加されたお気に入り <span>{favoriteItems.filter(item=>(item.pane===0 || !favoriteColumns.some(group=>group.id===item.pane)) && item.kind==='link').length}</span></header><div className="favorites-list">{favoriteItems.filter(item=>(item.pane===0 || !favoriteColumns.some(group=>group.id===item.pane)) && item.kind==='link').map(item=><FavoriteCard key={item.id} item={item} displayLabel={favoriteDisplayLabel(item)} iconSrc={favoriteIcon(item)} headingColors={headingColors} editing={editingFavoriteId===item.id} onDragStart={setDraggingFavoriteId} onPointerMove={trackFavoriteDrag} onPointerDrop={dropFavoriteAtPoint} onEdit={setEditingFavoriteId} onSave={saveFavoriteLabel} onDelete={removeFavorite} onOpen={openFavoriteTarget} onDropBefore={(dragId,beforeId)=>void moveFavorite(dragId,0,beforeId)} onColor={changeHeadingColor} draggingId={draggingFavoriteId} selectionMode={false} selected={false} onToggleSelect={()=>{}} />)}</div></section>
           </div>
         </div>
 
@@ -1085,6 +1080,7 @@ function App() {
           <div className={`favorites-container density-${settings.favoriteDensity}`} onClick={()=>setContextMenu(null)}>
             <div className="favorites-toolbar">
               <strong>お気に入り</strong>
+              <button type="button" className={organizing?'active':''} onClick={()=>setOrganizing(!organizing)}>{organizing?'整理を完了':'整理'}</button>
               <button type="button" className="manual-favorite-button" onClick={()=>setManualFavoriteOpen(true)} title="URLやファイルパスを手入力してお気に入りに追加">＋ 手動登録</button>
               <button type="button" onClick={()=>void openTrash()} title="削除したお気に入り（30日・最大30件）">削除済閲覧</button>
             </div>
@@ -1092,11 +1088,12 @@ function App() {
               {favoriteTabs.map((tab)=><button key={tab.id} data-favorite-tab-id={tab.id} className={`${activeTabId===tab.id?"active":""}${columnDropTarget?.type==="tab"&&columnDropTarget.id===tab.id?" column-drop-tab":""}${tabDropBeforeId===tab.id?" tab-drop-before":""}${draggingTabId===tab.id?" dragging-tab":""}`} style={{borderTopColor:tab.color}} onClick={()=>{if(suppressTabClickRef.current){suppressTabClickRef.current=false;return;}setActiveTabId(tab.id);}} onPointerDown={(e)=>{if(e.button!==0)return;tabPointerDragRef.current={id:tab.id,startX:e.clientX,startY:e.clientY,dragging:false};e.currentTarget.setPointerCapture(e.pointerId);}} onPointerMove={moveTabPointer} onPointerUp={endTabPointer} onPointerCancel={(e)=>{if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);tabPointerDragRef.current=null;setDraggingTabId(null);setTabDropBeforeId(null);}} onDragOver={(e)=>{if(draggingColumnRef.current||draggingColumnId){e.preventDefault();e.dataTransfer.dropEffect="move";setColumnDropTarget({type:"tab",id:tab.id});}}} onDrop={(e)=>{const raw=e.dataTransfer.getData("text/plain");const id=Number(raw.replace("column:",""))||draggingColumnRef.current||draggingColumnId;if(id){e.preventDefault();const column=favoriteColumns.find((c)=>c.id===id);if(column&&column.tabId!==tab.id)void moveColumnToTab(column,tab.id);}draggingColumnRef.current=null;setDraggingColumnId(null);setColumnDropTarget(null);}} onContextMenu={(event)=>{event.preventDefault();event.stopPropagation();setContextMenu({type:"tab",id:tab.id,x:event.clientX,y:event.clientY});}} title="ドラッグで並べ替え。右クリックで名前・色を変更。グループをドロップすると中身ごとこのタブへ移動">{tab.name}</button>)}
               <button type="button" className="add-tab" onClick={()=>void addTab()} title="お気に入りタブを追加">＋</button>
             </div>
-            <FavoriteBoard tabs={favoriteTabs} groups={favoriteColumns} items={favoriteItems} activeTab={activeTabId} setActiveTab={setActiveTabId} reload={async () => { await loadFavoriteLayout(); await loadFavorites(); }} moveItem={moveFavorite} toast={showToast} limit={settings.favoritePaneCount} initialColor={settings.headingDefaultColor} colors={headingColors} renderItem={(id, pane) => { const item = favoriteItems.find(value => value.id === id); return item ? <FavoriteCard key={id} item={item} displayLabel={favoriteDisplayLabel(item)} iconSrc={favoriteIcon(item)} headingColors={headingColors} editing={editingFavoriteId === id} onDragStart={setDraggingFavoriteId} onPointerMove={trackFavoriteDrag} onPointerDrop={dropFavoriteAtPoint} onEdit={setEditingFavoriteId} onSave={saveFavoriteLabel} onDelete={removeFavorite} onOpen={openFavoriteTarget} onDropBefore={(dragId, beforeId) => void moveFavorite(dragId, pane, beforeId)} onColor={changeHeadingColor} draggingId={draggingFavoriteId} dropBeforeId={favoriteDragPreview?.pane === pane ? favoriteDragPreview.beforeId : undefined} selectionMode={false} selected={false} onToggleSelect={() => {}} /> : null; }}><button className="add-column-tile" onClick={() => void addColumn()} title="空のグループを追加">＋</button></FavoriteBoard>
+            <FavoriteBoard organizing={organizing} showSearch={uiPreferences.showFavoriteSearch} tabs={favoriteTabs} groups={favoriteColumns} items={favoriteItems} activeTab={activeTabId} setActiveTab={setActiveTabId} reload={async () => { await loadFavoriteLayout(); await loadFavorites(); }} moveItem={moveFavorite} toast={showToast} limit={settings.favoritePaneCount} initialColor={settings.headingDefaultColor} colors={headingColors} renderItem={(id, pane) => { const item = favoriteItems.find(value => value.id === id); return item ? <FavoriteCard key={id} item={item} displayLabel={favoriteDisplayLabel(item)} iconSrc={favoriteIcon(item)} headingColors={headingColors} editing={editingFavoriteId === id} onDragStart={setDraggingFavoriteId} onPointerMove={trackFavoriteDrag} onPointerDrop={dropFavoriteAtPoint} onEdit={setEditingFavoriteId} onSave={saveFavoriteLabel} onDelete={removeFavorite} onOpen={openFavoriteTarget} onDropBefore={(dragId, beforeId) => void moveFavorite(dragId, pane, beforeId)} onColor={changeHeadingColor} draggingId={draggingFavoriteId} dropBeforeId={favoriteDragPreview?.pane === pane ? favoriteDragPreview.beforeId : undefined} selectionMode={false} selected={false} onToggleSelect={() => {}} /> : null; }} />
           </div>
         </div>
       </div>
       {favoriteDragPreview && draggingFavoriteId ? <div className="favorite-drag-preview" style={{ left: favoriteDragPreview.x + 14, top: favoriteDragPreview.y + 14 }}>{favoriteItems.find((item) => item.id === draggingFavoriteId)?.label ?? "お気に入り"}</div> : null}
+      {favoriteDragPreview?.lineY!==undefined && createPortal(<div className="drop-insertion-line" style={{left:favoriteDragPreview.lineX,top:favoriteDragPreview.lineY,width:favoriteDragPreview.lineWidth}} />,document.body)}
       {deletedFavorite ? <div className="undo-toast"><span>{deletedFavorite.kind === "heading" ? "見出し" : "お気に入り"}を削除しました</span><button type="button" onClick={()=>void undoFavoriteDelete()}>元に戻す</button><span className="toast-timer" /></div> : null}
       {toastMessage ? <div className="simple-toast">{toastMessage}</div>:null}
       {contextMenu ? <div className={`favorite-context-menu${contextMenu.type==="column"?" column-menu":""}`} style={{left:contextMenu.x,top:contextMenu.y}} onClick={(e)=>e.stopPropagation()}>
