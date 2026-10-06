@@ -180,6 +180,12 @@ function createHeadingColors(size: 32 | 64 | 128) {
   return colors.slice(0, size);
 }
 
+type FavoriteTextStyle = { color: string; bold: boolean };
+let favoriteTextStylesRequest: Promise<Record<string, FavoriteTextStyle>> | undefined;
+function loadFavoriteTextStyles() {
+  return favoriteTextStylesRequest ??= invoke<Record<string, FavoriteTextStyle>>("get_favorite_text_styles").catch(error => { favoriteTextStylesRequest = undefined; throw error; });
+}
+
 function FavoriteCard({ item, displayLabel, iconSrc, headingColors, editing, onDragStart, onPointerMove, onPointerDrop, onEdit, onSave, onDelete, onOpen, onDropBefore, onColor, draggingId, dropBeforeId, selectionMode, selected, onToggleSelect }: {
   item: FavoriteItem; displayLabel: string; editing: boolean; onDragStart: (id: number) => void; onEdit: (id: number) => void;
   iconSrc?: string;
@@ -189,6 +195,21 @@ function FavoriteCard({ item, displayLabel, iconSrc, headingColors, editing, onD
   onSave: (item: FavoriteItem, label: string) => Promise<void>; onDelete: (id: number) => Promise<void>;
   onOpen: (item: FavoriteItem) => void; onDropBefore: (dragId: number, beforeId: number) => void; onColor: (id: number, color: string) => Promise<void>; draggingId: number | null; dropBeforeId?: number; selectionMode: boolean; selected: boolean; onToggleSelect: (id: number) => void;
 }) {
+  const [menu, setMenu] = useState<{x:number;y:number}|null>(null);
+  const [textStyle, setTextStyle] = useState<FavoriteTextStyle>({color:"",bold:false});
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { let active=true; void loadFavoriteTextStyles().then(styles=>{if(active)setTextStyle(styles[item.id]??{color:"",bold:false});}).catch(console.error); return()=>{active=false;}; },[item.id]);
+  useEffect(() => {
+    if(!menu)return;
+    const close=(event:PointerEvent)=>{if(!menuRef.current?.contains(event.target as Node))setMenu(null);};
+    const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.stopImmediatePropagation();setMenu(null);}};
+    document.addEventListener('pointerdown',close);document.addEventListener('keydown',key,true);
+    return()=>{document.removeEventListener('pointerdown',close);document.removeEventListener('keydown',key,true);};
+  },[menu]);
+  const saveStyle=async(next:FavoriteTextStyle)=>{
+    try { await invoke('set_favorite_text_style',{id:item.id,...next});const styles=await loadFavoriteTextStyles();styles[item.id]=next;setTextStyle(next); }
+    catch(error){console.error(error);window.alert('文字の設定を保存できませんでした。');}
+  };
   const rgb = item.color?.match(/[a-f\d]{2}/gi)?.map((part) => parseInt(part, 16));
   const luminance = rgb ? rgb.map((value) => { const channel = value / 255; return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4; }) : null;
   const headingStyle = item.kind === "heading" ? { backgroundColor: item.color, color: luminance && luminance[0] * 0.2126 + luminance[1] * 0.7152 + luminance[2] * 0.0722 > 0.179 ? "#000" : "#fff" } : undefined;
@@ -198,8 +219,8 @@ function FavoriteCard({ item, displayLabel, iconSrc, headingColors, editing, onD
     document.addEventListener("pointerdown", closeOnOutsideClick);
     return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
   }, []);
-  const stale = item.kind === "link" && !!item.lastOpenedAt && Date.now() - new Date(item.lastOpenedAt).getTime() > 30 * 86400000;
-  return <div data-favorite-id={item.id} className={`favorite-item ${item.kind}${stale ? " stale-favorite" : ""}${draggingId === item.id ? " pointer-dragging" : ""}${dropBeforeId === item.id ? " drop-before" : ""}${selected ? " selected-favorite" : ""}`} style={headingStyle} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const dragId = Number(event.dataTransfer.getData("text/plain")) || draggingId; if (dragId) onDropBefore(dragId, item.id); }}>
+  return <div data-favorite-id={item.id} className={`favorite-item ${item.kind}${draggingId === item.id ? " pointer-dragging" : ""}${dropBeforeId === item.id ? " drop-before" : ""}${selected ? " selected-favorite" : ""}`} style={{...headingStyle, '--favorite-text-color':textStyle.color||'inherit','--favorite-text-weight':textStyle.bold?700:400} as React.CSSProperties} onContextMenu={event=>{event.preventDefault();event.stopPropagation();setMenu({x:Math.max(0,Math.min(event.clientX,window.innerWidth-170)),y:Math.max(0,Math.min(event.clientY,window.innerHeight-190))});}} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const dragId = Number(event.dataTransfer.getData("text/plain")) || draggingId; if (dragId) onDropBefore(dragId, item.id); }}>
+    {menu && createPortal(<div ref={menuRef} className="favorite-context-menu" style={{left:menu.x,top:menu.y}} onClick={event=>event.stopPropagation()} onContextMenu={event=>event.preventDefault()}><button onClick={()=>{setMenu(null);onEdit(item.id);}}>名前を変更</button><label>文字色<input aria-label="お気に入りの文字色" type="color" value={textStyle.color||'#334155'} onChange={event=>void saveStyle({...textStyle,color:event.target.value})}/></label><button onClick={()=>void saveStyle({...textStyle,bold:!textStyle.bold})}>{textStyle.bold?'✓ ':''}太字</button><button onClick={()=>void saveStyle({color:'',bold:false})}>文字装飾をリセット</button><button className="delete-column-menu" onClick={()=>{setMenu(null);void onDelete(item.id);}}>削除</button></div>,document.body)}
     <span className="drag-handle" onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); onDragStart(item.id); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) onPointerMove(item.id, event.clientX, event.clientY); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); onPointerDrop(item.id, event.clientX, event.clientY); }} title="ここをドラッグして移動">⋮⋮</span>
     {selectionMode ? <button type="button" className={`favorite-select-box${selected ? " checked" : ""}`} onClick={() => onToggleSelect(item.id)}>{selected ? "✓" : ""}</button> : null}
     {item.kind === "link" ? <SourceIcon src={iconSrc} service={item.service ?? "edge"} /> : null}
@@ -462,9 +483,12 @@ function App() {
     });
   },[results,favoriteItems]);
   useEffect(()=>{
-    const representatives=new Map<string,string>();fileResults.filter((f)=>!f.isDirectory).forEach((f)=>{const ext=f.name.includes(".")?f.name.split(".").pop()!.toLowerCase():"";if(!representatives.has(ext))representatives.set(ext,f.path);});
-    favoriteItems.filter((f)=>f.service==="folder"&&!!f.target).forEach((f)=>{const name=f.target!.split(/[\\/]/).pop()??"";const ext=name.includes(".")?name.split(".").pop()!.toLowerCase():"";if(ext&&!representatives.has(ext))representatives.set(ext,f.target!);});
-    [...representatives.entries()].slice(0,50).forEach(([ext,path])=>{if(fileIcons[ext])return;void invoke<string|null>("get_file_icon",{path}).then((icon)=>{if(icon)setFileIcons((v)=>({...v,[ext]:icon}));});});
+    const paths=[...new Set([...fileResults.map(file=>file.path),...favoriteItems.filter(item=>item.service==='folder'&&item.target).map(item=>item.target!)])];
+    let active=true;
+    iconQueueRef.current=iconQueueRef.current.catch(()=>{}).then(async()=>{
+      for(const path of paths){if(!active)break;if(fileIcons[path])continue;try{const icon=await invoke<string|null>('get_file_icon',{path});if(active&&icon)setFileIcons(value=>({...value,[path]:icon}));}catch(error){console.error('get_file_icon',error);}}
+    });
+    return()=>{active=false;};
   },[fileResults,favoriteItems]);
 
   useEffect(() => {
@@ -513,7 +537,7 @@ function App() {
   const filteredResults = useMemo(() => results, [results]);
   const headingColors = useMemo(() => createHeadingColors(settings.headingPaletteSize), [settings.headingPaletteSize]);
   const favoriteDisplayLabel = (item: FavoriteItem) => item.label;
-  const favoriteIcon = (item:FavoriteItem) => { if(!item.target)return undefined;if(item.service!=="folder")return webIcons[item.target] ?? websiteFaviconUrl(item.target);const name=item.target.split(/[\\/]/).pop()??"";const ext=name.includes(".")?name.split(".").pop()!.toLowerCase():"";return fileIcons[ext]; };
+  const favoriteIcon = (item:FavoriteItem) => { if(!item.target)return undefined;if(item.service!=="folder")return webIcons[item.target] ?? websiteFaviconUrl(item.target);return fileIcons[item.target]; };
   const activeResultCount = settings.searchMode === "web" ? filteredResults.length : fileResults.length;
 
   useEffect(() => {
@@ -1003,7 +1027,7 @@ openWebLink(item.url)
                 fileResults.length === 0 ? <div className="empty-state">候補がありません。設定からインデックスを作成してください。</div> : fileResults.map((file, index) => (
                   <div key={file.id} className={`file-result-card ${index === selectedIndex ? "selected" : ""}`} title={`${file.name}\n${file.path}`}>
                     <button type="button" className={`result-star ${file.isFavorite ? "favorited" : ""}`} onClick={(event) => { event.stopPropagation(); void toggleFileFavorite(file); }}>{file.isFavorite ? "★" : "☆"}</button>
-                    <button type="button" className="file-open-button" onClick={() => void openLocalPathAndHide(file.path)}><span className="file-kind">{file.isDirectory ? "📁" : fileIcons[file.name.includes(".")?file.name.split(".").pop()!.toLowerCase():""] ? <img className="source-icon" src={fileIcons[file.name.includes(".")?file.name.split(".").pop()!.toLowerCase():""]} alt=""/> : "▤"}</span><span className="file-result-main"><strong>{file.name}</strong><small>{file.path}</small></span></button>
+                    <button type="button" className="file-open-button" onClick={() => void openLocalPathAndHide(file.path)}><span className="file-kind">{fileIcons[file.path] ? <img className="source-icon" src={fileIcons[file.path]} alt=""/> : file.isDirectory ? "📁" : "▤"}</span><span className="file-result-main"><strong>{file.name}</strong><small>{file.path}</small></span></button>
                   </div>
                 ))
               ) : filteredResults.length === 0 && query !== "" ? (

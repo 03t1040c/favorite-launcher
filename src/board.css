@@ -29,7 +29,7 @@ button:focus-visible,input:focus-visible,select:focus-visible { outline:2px soli
 .board-grid:not(.organizing) .favorite-edit,.board-grid:not(.organizing) .favorite-delete { display:none; }
 .board-grid.organizing .favorite-edit,.board-grid.organizing .favorite-delete { opacity:1; }
 .board-group .favorite-content { font-size:12px; min-width:0; }
-.board-group .favorite-item .fav-title { font-size:12px; font-weight:500; }
+.board-group .favorite-item .fav-title { font-size:12px; font-weight:var(--favorite-text-weight,400); }
 .density-compact .board-group .favorite-item { height:27px; min-height:27px; padding:2px 3px; }
 .density-standard .board-group .favorite-item { min-height:34px; }
 .density-comfortable .board-group .favorite-item { min-height:43px; }

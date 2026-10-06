@@ -3623,14 +3623,8 @@ pub fn get_edge_favicon(url: &str) -> Result<Option<String>, Box<dyn Error>> {
 
 pub fn get_file_icon(path: &str) -> Result<Option<String>, Box<dyn Error>> {
     let p = Path::new(path);
-    if p.is_dir() {
-        return Ok(None);
-    }
-    let key = p
-        .extension()
-        .and_then(|v| v.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    // Shell icons can vary per directory, executable and shortcut, not just extension.
+    let key = p.to_string_lossy().to_ascii_lowercase();
     if let Ok(cache) = FILE_ICON_CACHE.lock() {
         if let Some(value) = cache.get(&key) {
             return Ok(value.clone());
@@ -3644,6 +3638,23 @@ pub fn get_file_icon(path: &str) -> Result<Option<String>, Box<dyn Error>> {
         cache.insert(key, value.clone());
     }
     Ok(value)
+}
+
+pub fn get_favorite_text_styles() -> Result<serde_json::Value, Box<dyn Error>> {
+    let conn = Connection::open(db_path()?)?;
+    let mut stmt = conn.prepare("SELECT key,value FROM app_meta WHERE key LIKE 'favorite_text_style_%'")?;
+    let mut styles = serde_json::Map::new();
+    for row in stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
+        let (key,value) = row?;
+        if let Ok(value) = serde_json::from_str(&value) { styles.insert(key.trim_start_matches("favorite_text_style_").to_string(),value); }
+    }
+    Ok(serde_json::Value::Object(styles))
+}
+
+pub fn set_favorite_text_style(id: i64, color: &str, bold: bool) -> Result<(), Box<dyn Error>> {
+    if !color.is_empty() && !(color.len()==7 && color.starts_with('#') && color[1..].chars().all(|c|c.is_ascii_hexdigit())) { return Err("Invalid text color".into()); }
+    Connection::open(db_path()?)?.execute("INSERT INTO app_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("favorite_text_style_{id}"),serde_json::json!({"color":color,"bold":bold}).to_string()])?;
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

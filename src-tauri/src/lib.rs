@@ -193,6 +193,16 @@ fn set_favorite_color(id: i64, color: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_favorite_text_styles() -> Result<serde_json::Value, String> {
+    db::get_favorite_text_styles().map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+fn set_favorite_text_style(id: i64, color: String, bold: bool) -> Result<(), String> {
+    db::set_favorite_text_style(id, &color, bold).map_err(|e|e.to_string())
+}
+
+#[tauri::command]
 fn set_all_heading_colors(color: String) -> Result<(), String> {
     db::set_all_heading_colors(&color).map_err(|e| e.to_string())
 }
@@ -796,6 +806,8 @@ pub fn run() {
             delete_favorite_item,
             place_favorite_items,
             set_favorite_color,
+            get_favorite_text_styles,
+            set_favorite_text_style,
             set_all_heading_colors,
             save_window_size,
             hide_main_window,

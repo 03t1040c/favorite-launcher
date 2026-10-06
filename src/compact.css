@@ -869,7 +869,7 @@ input {
 .favorite-tabs button.dragging-tab { opacity:.45; }
 .favorite-tabs.tab-drop-end { box-shadow:inset -3px 0 0 #2563eb; }
 .add-column-tile { align-self:start; width:34px; height:28px; margin:5px 0 0 5px; border:1px dashed #94a3b8; border-radius:7px; background:#f8fafc; color:#64748b; cursor:pointer; }
-.favorite-item.stale-favorite { opacity:.52; }
+.favorite-item .fav-title { color:var(--favorite-text-color,inherit); font-weight:var(--favorite-text-weight,400); }
 .density-compact .favorite-item { min-height:25px; padding-top:1px; padding-bottom:1px; }
 .density-compact .fav-title { font-size:11px; }
 .density-compact .favorites-list.unified .favorite-item { min-height:20px; height:20px; padding:0 2px; }
