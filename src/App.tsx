@@ -966,7 +966,7 @@ openWebLink(item.url)
                           <textarea rows={6} value={quickKeywordsText} onChange={(e)=>setQuickKeywordsText(e.target.value)}/>
                         </section>
                         <section className="settings-section data-tools-section">
-<div className="settings-section-title"><div><strong>バックアップと診断</strong><small>お気に入り・レイアウト・設定を安全に保管します</small></div><span className="app-version">v0.3.4</span></div>
+<div className="settings-section-title"><div><strong>バックアップと診断</strong><small>お気に入り・レイアウト・設定を安全に保管します</small></div><span className="app-version">v0.3.6</span></div>
                           <div className="data-tool-actions"><button type="button" title="現在のDBを整合性のある状態で1ファイルへ保存します。お気に入り、タブ、列、色、設定をすべて含みます。" onClick={async()=>{const path=await invoke<string|null>("create_backup");if(path)showToast(`バックアップを保存しました: ${path}`);}}>バックアップ作成</button><button type="button" title="バックアップから復元します。復元直前の現在DBも自動退避し、完了後に画面を再読み込みします。" onClick={async()=>{if(!confirm("バックアップから復元しますか？"))return;const path=await invoke<string|null>("restore_backup");if(path)window.location.reload();}}>復元</button><button type="button" title="個人のURLやファイル名を含まない診断概要をクリップボードへコピーします。" onClick={async()=>{const value=await invoke<string>("diagnostics_text");await navigator.clipboard.writeText(value);showToast("診断情報をコピーしました");}}>診断情報をコピー</button></div>
                         </section>
                         <div className="edge-import-debug app-log-panel">
