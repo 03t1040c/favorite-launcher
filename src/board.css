@@ -118,6 +118,11 @@ button:focus-visible,input:focus-visible,select:focus-visible { outline:2px soli
 .settings-modal .folder-paths-field textarea { height:56px; min-height:56px; max-height:56px; resize:none; overflow:auto; }
 .settings-modal .quick-settings-section textarea { height:112px; min-height:112px; max-height:112px; resize:none; overflow:auto; }
 .edge-store-row { margin-top:5px; display:flex; gap:5px; }
+.edge-store-setup { margin-top:7px; padding:7px 8px; border:1px solid #bfdbfe; border-radius:7px; background:#eff6ff; }
+.edge-store-setup .edge-store-row { margin-top:0; align-items:center; flex-wrap:wrap; }
+.settings-modal .edge-store-row .edge-store-register { background:#2563eb; color:#fff; border:1px solid #1d4ed8; font-weight:600; padding:6px 10px; }
+.settings-modal .edge-store-row .edge-store-register:hover { background:#1d4ed8; }
+.edge-store-guide { display:block; margin-top:5px; color:#475569; font-size:10px; line-height:1.5; }
 .edge-primary-row { gap:5px; }
 .settings-modal .settings-pane-right .app-log-panel { min-height:0; overflow:hidden; }
 .search-inbox .favorites-list { display:flex; flex-direction:column; gap:2px; }

@@ -842,31 +842,6 @@ openWebLink(item.url)
   const restoreTrash = async(id:number)=>{await invoke("restore_deleted_favorite",{id});await Promise.all([loadFavorites(),loadSearchResults()]);setDeletedFavorites((items)=>items.filter((item)=>item.id!==id));};
   const purgeTrash = async(id:number)=>{await invoke("permanently_delete_favorite",{id});setDeletedFavorites((items)=>items.filter((item)=>item.id!==id));};
 
-  const handleEdgeHistoryRefresh = async () => {
-    if (edgeImportStatus.running) {
-      return;
-    }
-
-    setEdgeImportStatus((current) => ({
-      ...current,
-      running: true,
-      message: "Edge履歴を更新しています…",
-    }));
-
-    try {
-      await invoke("refresh_edge_history");
-      setQuery("");
-      await Promise.all([loadSearchResults(), loadFavorites(), loadEdgeImportStatus(true)]);
-    } catch (error) {
-      console.error("refresh_edge_history error", error);
-      try {
-        await loadEdgeImportStatus(true);
-      } catch (statusError) {
-        console.error("Failed to reload Edge import status", statusError);
-      }
-    }
-  };
-
   const handleEdgeHistoryClear = async () => {
     if (edgeImportStatus.running) {
       return;
@@ -978,8 +953,10 @@ openWebLink(item.url)
                         <section className="settings-section edge-settings-section">
                           <div className="settings-section-title"><div><strong>Edge履歴</strong><small>通常は拡張機能が自動で差分を取り込みます</small><span className={`edge-live-status${extensionConnection.connected?" connected":""}`}>● {extensionConnection.connected?`接続済み（最終通信 ${extensionConnection.lastContact ?? "-"}）`:`未接続・待機中（${extensionSyncMessage}）`}</span></div><button type="button" title="アプリ内のWeb履歴だけを削除します。Edge本体の履歴とお気に入りは削除しません。削除後は拡張機能へ全件再送を自動要求します。" onClick={()=>void handleEdgeHistoryClear()} disabled={edgeImportStatus.running}>履歴クリア</button></div>
                           <div className="edge-primary-row"><span>自動取得 <SettingHelp text="ページを開くと拡張機能からすぐ送信され、起動中のアプリは約1秒以内を目安に反映します。この間隔は取りこぼしを補う定期同期の間隔です。ブラウザーの制約で定期同期は最短30秒です。" /></span><label>間隔 <input type="number" min={10} max={3600} value={settings.edgeSyncIntervalSeconds} onChange={(e)=>setSettings({...settings,edgeSyncIntervalSeconds:Number(e.target.value)})}/> 秒</label><button type="button" title={`履歴の欠落が疑われる場合や、履歴クリア後にEdgeの全履歴を送り直します。実行は次回の拡張通信時です。\n現在の状態: ${extensionSyncMessage}`} onClick={async()=>{await invoke("request_extension_full_sync");setExtensionSyncMessage("全件受信を要求しました。次回通信を待っています");showToast("全件受信を要求しました");}}>全件受信</button></div>
-                          <div className="edge-emergency-row"><span>非常用：Historyファイル読込 <SettingHelp text="Edge拡張機能が使えない場合だけ利用します。EdgeのHistoryファイルは使用中にロックされるため、読み込めない場合はEdgeを完全終了し、案内に従ってHistoryファイルを選択してください。通常は使いません。" /></span><button type="button" title="非常用の手動読込を開始します。Edgeが起動中だとHistoryファイルを読めない場合があります。" onClick={()=>void handleEdgeHistoryRefresh()} disabled={edgeImportStatus.running}>{edgeImportStatus.running?"読込中…":"読込"}</button></div>
-                          <div className="edge-store-row"><button type="button" onClick={async()=>{const id=prompt("拡張機能のポップアップでコピーしたストア版IDを入力してください");if(!id)return;try{await invoke("configure_store_extension",{id:id.trim()});showToast("ストア版拡張機能との連携を登録しました");}catch(error){showToast(String(error));}}}>ストア版IDを登録</button><button type="button" onClick={()=>void invoke("open_edge_extensions")}>拡張機能の管理</button></div>
+                          <div className="edge-store-setup">
+                            <div className="edge-store-row"><button type="button" className="edge-store-register" title="初回設定：Edge右上のパズル形アイコン → Search Launcher Edge History Sync → IDをコピー。そのIDをここに登録すると、このPCのアプリとの通信が許可されます。" onClick={async()=>{const id=prompt("【ストア版との初回接続設定】\n1. Edge右上のパズル形アイコンをクリック\n2.「Search Launcher Edge History Sync」を開く\n3. 小さな画面の「IDをコピー」を押す\n4. 下の欄に貼り付けて登録\n\nIDはa～pの英小文字32文字です。ストアのURLやStore IDではありません。開発者モードは不要です。\n登録はすぐに保存され、設定画面の保存ボタンは不要です。");if(!id)return;try{await invoke("configure_store_extension",{id:id.trim()});showToast("ストア版IDを登録しました。Edgeで通常のWebページを開き、接続を確認してください");}catch(error){showToast(String(error));}}}>ストア版IDを登録（初回設定）</button><SettingHelp text="ストアから拡張機能を入れるだけでは、アプリとの接続許可は登録されません。①Edge右上のパズル形アイコンを押す → ②「Search Launcher Edge History Sync」の名前をクリック → ③開いた小さな画面で「IDをコピー」→ ④この登録ボタンを押し、貼り付けて確定してください。拡張機能の管理・詳細画面には「IDをコピー」はありません。IDはa～pの英小文字32文字で、ストアのURLやStore IDとは異なります。開発者モード、InPrivate、ファイルURLのアクセス許可は不要です。登録は即時保存されます。登録後、アプリを起動したままEdgeで通常のWebページを開き、この欄が「接続済み」になるか確認します。接続しない場合は拡張機能を一度オフ→オンにして再確認してください。古い開発版は二重送信防止のためオフにしてください。" /><button type="button" title="Edgeの拡張機能一覧を開きます。拡張機能がインストール済みでオンになっているか確認できます。IDのコピーは、この一覧ではなくEdge右上のパズル形アイコンから拡張機能を開いて行います。" onClick={()=>void invoke("open_edge_extensions")}>拡張機能の管理</button></div>
+                            <small className="edge-store-guide">初めて使う方：Edge右上のパズル形アイコン → 拡張機能を開く →「IDをコピー」→ 左のボタンで登録</small>
+                          </div>
                         </section>
                       </div>
 

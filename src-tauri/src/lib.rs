@@ -500,15 +500,27 @@ fn save_edge_diagnostics(error: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn open_url(window: tauri::Window, url: String) -> Result<(), String> {
-    // Use the cross-platform 'open' crate to open a URL in the default browser
-    match tauri::async_runtime::spawn_blocking(move || open::that(&url).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())? {
-        Ok(_) => {
-            // keep app resident in tray
-            let _ = window.hide();
-            Ok(())
-        }
-        Err(e) => Err(e.to_string()),
+    let parsed = tauri::Url::parse(&url).map_err(|_| "WebリンクのURLが不正です".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("http/httpsのWebリンクのみ開けます".into());
     }
+    let started = std::time::Instant::now();
+    tauri::async_runtime::spawn_blocking(move || {
+        let direct = db::launch_web_link_in_edge(&url);
+        let (result, method) = match direct {
+            Ok(()) => (Ok(()), "Edge直接起動"),
+            Err(_) => (open::that(&url).map_err(|_| "Edgeと既定ブラウザーの起動に失敗しました".to_string()), "既定ブラウザーへフォールバック"),
+        };
+        // Measure dispatch only, not page load. Never log browsing URLs/titles.
+        let elapsed = started.elapsed().as_millis();
+        let level = if result.is_err() { "error" } else if method != "Edge直接起動" || elapsed >= 1000 { "warning" } else { "info" };
+        let message = format!("{method}：URL受け渡し {}（{elapsed}ms）。ページ表示時間は含みません", if result.is_ok() { "完了" } else { "失敗" });
+        // Logging must not hold up launching or hiding the application.
+        tauri::async_runtime::spawn_blocking(move || { let _ = db::append_app_log("Webリンク起動",level,&message); });
+        result
+    }).await.map_err(|e|e.to_string())??;
+    let _ = window.hide();
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

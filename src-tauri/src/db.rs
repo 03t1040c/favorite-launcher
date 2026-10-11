@@ -2350,6 +2350,22 @@ fn resolve_edge_executable() -> Result<PathBuf, Box<dyn Error>> {
     Err("Edge executable was not found.".into())
 }
 
+/// Pass a URL as a single argument; never interpolate it into a shell command.
+pub fn launch_web_link_in_edge(url: &str) -> Result<(), Box<dyn Error>> {
+    #[cfg(target_os = "windows")]
+    use std::os::windows::process::CommandExt;
+    let executable = resolve_edge_executable()?;
+    let mut command = Command::new(executable);
+    command.arg("--new-tab").arg(url);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+    let mut child = command.spawn()?;
+    // Edge forwards the request to its existing process. Do not wait on the
+    // browser before returning to the UI, but reap the launcher in background.
+    std::thread::spawn(move || { let _ = child.wait(); });
+    Ok(())
+}
+
 fn should_fallback_to_move(error: &(dyn Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(item) = current {
