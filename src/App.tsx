@@ -7,8 +7,8 @@ import "./board.css";
 import FavoriteBoard from "./FavoriteBoard";
 
 type ServiceType = "spo" | "asana" | "notion" | "edge" | "folder";
-type UiPreferences = { showFavoriteSearch: boolean; resetTabAfterLink: boolean };
-const defaultUiPreferences: UiPreferences = {showFavoriteSearch:true,resetTabAfterLink:false};
+type UiPreferences = { showFavoriteSearch: boolean; resetTabAfterLink: boolean; hideAfterLink: boolean };
+const defaultUiPreferences: UiPreferences = {showFavoriteSearch:true,resetTabAfterLink:false,hideAfterLink:true};
 
 type SearchResult = {
   id: number;
@@ -323,6 +323,8 @@ function App() {
   const [organizing,setOrganizing]=useState(false);
   const [uiPreferences,setUiPreferences]=useState(defaultUiPreferences);
   const [persistedUiPreferences,setPersistedUiPreferences]=useState(defaultUiPreferences);
+  const hideAfterLinkRef=useRef(true);
+  hideAfterLinkRef.current=persistedUiPreferences.hideAfterLink;
   const navigationPendingRef=useRef(false);
   const tabResetRef=useRef({enabled:false,firstTab:1});
   tabResetRef.current={enabled:persistedUiPreferences.resetTabAfterLink,firstTab:favoriteTabs[0]?.id??1};
@@ -604,6 +606,7 @@ function App() {
           setActionMessage(`「${item.title}」を選択しました。`);
 openWebLink(item.url)
             .then(() => {
+              if(!hideAfterLinkRef.current)return;
               try {
                 void getCurrentWindow().hide();
               } catch {
@@ -675,6 +678,7 @@ openWebLink(item.url)
       setCurrentWindowSize(saved.windowSize);
       window.setTimeout(() => { programmaticResizeRef.current = false; }, 800);
       await loadFavorites();
+      if(saved.searchMode==='folder')setFileResults(await invoke<FileSearchResult[]>('search_file_index',{query,filter:fileFilter}));
       setSettingsOpen(false);
       localStorage.removeItem("quickSettings");
     } catch (error) {
@@ -712,8 +716,8 @@ openWebLink(item.url)
   };
   const routeNewFavorite = async (_target: string) => { /* New links remain in the search-side inbox. */ };
   const openWebLink = (url: string) => {
-    navigationPendingRef.current=true;
-    return invoke('open_url',{url}).catch(error=>{navigationPendingRef.current=false;throw error;});
+    navigationPendingRef.current=hideAfterLinkRef.current;
+    return invoke('open_url',{url,hideAfterOpen:hideAfterLinkRef.current}).catch(error=>{navigationPendingRef.current=false;throw error;});
   };
   useEffect(()=>{
     let disposed=false;
@@ -727,7 +731,8 @@ openWebLink(item.url)
     return ()=>{disposed=true;unlisten?.();};
   },[]);
   const openLocalPathAndHide = async (path: string) => {
-    await invoke("open_local_path", { path });
+    await invoke("open_local_path", { path, hideAfterOpen:hideAfterLinkRef.current });
+    if(!hideAfterLinkRef.current)return;
     navigationPendingRef.current=true;
     try { await new Promise((resolve) => window.setTimeout(resolve, 100)); await getCurrentWindow().hide(); } catch { /* path is already open */ }
   };
@@ -818,7 +823,7 @@ openWebLink(item.url)
     if (!item.target) return;
     void invoke("record_favorite_open", { id:item.id });
     setFavoriteItems((items) => items.map((value) => value.id === item.id ? {...value, openedCount:(value.openedCount ?? 0)+1, lastOpenedAt:new Date().toISOString()} : value));
-    if (item.service === "folder") void openLocalPathAndHide(item.target); else { hideToTray(); void openWebLink(item.target).catch(error=>showToast(`開けませんでした: ${error}`)); }
+    if (item.service === "folder") void openLocalPathAndHide(item.target); else { if(hideAfterLinkRef.current)hideToTray(); void openWebLink(item.target).catch(error=>showToast(`開けませんでした: ${error}`)); }
   };
   const activeColumns = favoriteColumns.filter((column) => column.tabId === activeTabId);
   const addTab = async () => { try { const id=await invoke<number>("add_favorite_tab",{limit:settings.favoriteTabLimit}); await loadFavoriteLayout(); setActiveTabId(id); } catch(error){showToast(String(error));} };
@@ -930,7 +935,8 @@ openWebLink(item.url)
                             <label><span>アプリサイズ <SettingHelp text="起動時に復元するアプリの大きさです。設定画面の全項目を見切れず表示できるよう、最小サイズは1100 × 760です。ウィンドウをマウスで直接リサイズした場合は「カスタム」として、その大きさを次回も復元します。" /></span><select value={presetWindowSizes.includes(settings.windowSize) ? settings.windowSize : "custom"} onChange={(e)=>{if(e.target.value!=="custom")setSettings({...settings,windowSize:e.target.value});}}><option value="1100x760">1100 × 760</option><option value="1200x800">1200 × 800</option><option value="1280x840">1280 × 840</option><option value="1360x900">1360 × 900</option><option value="custom">カスタム</option></select></label>
                             <div className="current-size-display"><span>現在のサイズ</span><strong>{currentWindowSize.replace("x"," × ")}</strong></div>
                             <label className="ui-preference"><span>お気に入り検索を表示 <SettingHelp text="お気に入りペインの検索欄を表示します。非表示にすると検索による絞り込みも解除され、現在のタブのすべてのお気に入りが表示されます。設定は再起動後も保持されます。" /></span><input type="checkbox" checked={uiPreferences.showFavoriteSearch} onChange={e=>setUiPreferences({...uiPreferences,showFavoriteSearch:e.target.checked})}/></label>
-                            <label className="ui-preference"><span>リンクを開いた後は先頭タブ <SettingHelp text="Webページやフォルダを開いてアプリが隠れた後、再表示すると一番左のタブへ戻ります。オフの場合は使っていたタブを保持します。Escなどで隠しただけの場合はタブを変更しません。" /></span><input type="checkbox" checked={uiPreferences.resetTabAfterLink} onChange={e=>setUiPreferences({...uiPreferences,resetTabAfterLink:e.target.checked})}/></label>
+                            <label className="ui-preference"><span>リンクを開いたら隠す <SettingHelp text="オンにすると、Webリンクやフォルダ・ファイルを開いた後、このアプリをトレイへ隠します。オフにするとアプリのウィンドウを残すので、続けて別のお気に入りを開けます。アプリが常に最前面になる設定ではないため、Edgeなどの後ろに回る場合はあります。保存後に反映され、再起動後も保持します。" /></span><input type="checkbox" checked={uiPreferences.hideAfterLink} onChange={e=>setUiPreferences({...uiPreferences,hideAfterLink:e.target.checked})}/></label>
+                            <label className="ui-preference"><span>リンクを開いた後は先頭タブ <SettingHelp text="「リンクを開いたら隠す」がオンの場合に、リンクを開いて隠れたアプリを再表示すると一番左のタブへ戻ります。ウィンドウを残す場合はタブを変えません。Escなどで隠しただけの場合も変更しません。" /></span><input type="checkbox" checked={uiPreferences.resetTabAfterLink} onChange={e=>setUiPreferences({...uiPreferences,resetTabAfterLink:e.target.checked})}/></label>
                             <label><span>グループの初期色 <SettingHelp text="新しく作るグループの識別色です。既存のグループは自動では変わりません。「全グループに適用」を押した場合だけ、既存のグループもこの色に揃えます。" /></span><div className="heading-default-control"><input type="color" value={settings.headingDefaultColor} onChange={(e)=>setSettings({...settings,headingDefaultColor:e.target.value})}/><button type="button" onClick={()=>void applyHeadingColorToAll()}>全グループに適用</button></div></label>
                             <label><span>グループの色数 <SettingHelp text="各グループの設定メニューに表示する色の候補数です。32色は薄め中心、64色と128色では濃い色も段階的に追加されます。" /></span><select value={settings.headingPaletteSize} onChange={(e)=>setSettings({...settings,headingPaletteSize:Number(e.target.value) as 32|64|128})}><option value={32}>32色</option><option value={64}>64色</option><option value={128}>128色</option></select></label>
                           </div>
@@ -966,7 +972,7 @@ openWebLink(item.url)
                           <textarea rows={6} value={quickKeywordsText} onChange={(e)=>setQuickKeywordsText(e.target.value)}/>
                         </section>
                         <section className="settings-section data-tools-section">
-<div className="settings-section-title"><div><strong>バックアップと診断</strong><small>お気に入り・レイアウト・設定を安全に保管します</small></div><span className="app-version">v0.3.6</span></div>
+<div className="settings-section-title"><div><strong>バックアップと診断</strong><small>お気に入り・レイアウト・設定を安全に保管します</small></div><span className="app-version">v0.3.7</span></div>
                           <div className="data-tool-actions"><button type="button" title="現在のDBを整合性のある状態で1ファイルへ保存します。お気に入り、タブ、列、色、設定をすべて含みます。" onClick={async()=>{const path=await invoke<string|null>("create_backup");if(path)showToast(`バックアップを保存しました: ${path}`);}}>バックアップ作成</button><button type="button" title="バックアップから復元します。復元直前の現在DBも自動退避し、完了後に画面を再読み込みします。" onClick={async()=>{if(!confirm("バックアップから復元しますか？"))return;const path=await invoke<string|null>("restore_backup");if(path)window.location.reload();}}>復元</button><button type="button" title="個人のURLやファイル名を含まない診断概要をクリップボードへコピーします。" onClick={async()=>{const value=await invoke<string>("diagnostics_text");await navigator.clipboard.writeText(value);showToast("診断情報をコピーしました");}}>診断情報をコピー</button></div>
                         </section>
                         <div className="edge-import-debug app-log-panel">
@@ -1031,6 +1037,7 @@ openWebLink(item.url)
                         setActionMessage(`「${result.title}」を選択しました。`);
                         openWebLink(result.url)
                           .then(() => {
+                            if(!hideAfterLinkRef.current)return;
                             try {
                               void getCurrentWindow().hide();
                             } catch {

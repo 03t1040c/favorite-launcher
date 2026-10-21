@@ -391,9 +391,9 @@ async fn search_file_index(query: String, filter: Option<String>) -> Result<Vec<
 }
 
 #[tauri::command]
-async fn open_local_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
+async fn open_local_path(window: tauri::WebviewWindow, path: String, hide_after_open: Option<bool>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || open::that(path).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())??;
-    window.hide().map_err(|e|e.to_string())
+    if hide_after_open.unwrap_or(true) { window.hide().map_err(|e|e.to_string()) } else { Ok(()) }
 }
 
 #[tauri::command]
@@ -499,7 +499,7 @@ fn save_edge_diagnostics(error: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn open_url(window: tauri::Window, url: String) -> Result<(), String> {
+async fn open_url(window: tauri::Window, url: String, hide_after_open: Option<bool>) -> Result<(), String> {
     let parsed = tauri::Url::parse(&url).map_err(|_| "WebリンクのURLが不正です".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("http/httpsのWebリンクのみ開けます".into());
@@ -519,7 +519,7 @@ async fn open_url(window: tauri::Window, url: String) -> Result<(), String> {
         tauri::async_runtime::spawn_blocking(move || { let _ = db::append_app_log("Webリンク起動",level,&message); });
         result
     }).await.map_err(|e|e.to_string())??;
-    let _ = window.hide();
+    if hide_after_open.unwrap_or(true) { let _ = window.hide(); }
     Ok(())
 }
 

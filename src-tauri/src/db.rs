@@ -863,8 +863,12 @@ pub fn get_settings() -> Result<AppSettingsResponse, Box<dyn Error>> {
 
 pub fn save_settings(settings: AppSettings) -> Result<AppSettings, Box<dyn Error>> {
     let path = db_path()?;
-    let conn = Connection::open(path)?;
+    let mut connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    let conn = connection.transaction()?;
     let sanitized = settings.sanitized();
+    let folder_json = serde_json::to_string(&sanitized.index_folders)?;
+    let previous_roots: Option<String> = conn.query_row("SELECT value FROM app_meta WHERE key='file_index_configured_roots'",[],|row|row.get(0)).optional()?;
 
     conn.execute(
         "INSERT INTO settings (id, display_count, quick_keywords, blocked_words, site_names, show_edge_favorites, search_mode, window_size, index_folders, favorite_pane_count, left_pane_percent, favorite_density, favorite_tab_limit, edge_sync_interval_minutes, edge_sync_interval_seconds, folder_sync_interval_seconds)
@@ -911,6 +915,11 @@ pub fn save_settings(settings: AppSettings) -> Result<AppSettings, Box<dyn Error
         "INSERT INTO app_meta(key,value) VALUES('heading_palette_size',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![sanitized.heading_palette_size.to_string()],
     )?;
+    if previous_roots.as_deref() != Some(folder_json.as_str()) {
+        prune_unregistered_file_index(&conn, &sanitized.index_folders)?;
+        conn.execute("INSERT INTO app_meta(key,value) VALUES('file_index_configured_roots',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![folder_json])?;
+    }
+    conn.commit()?;
     if let Ok(dir) = extension_data_dir() {
         let _ = fs::create_dir_all(&dir);
         let _ = fs::write(
@@ -3266,9 +3275,10 @@ pub fn save_board_layout(value: &str) -> Result<(), Box<dyn Error>> {
 pub struct UiPreferences {
     pub show_favorite_search: bool,
     pub reset_tab_after_link: bool,
+    pub hide_after_link: bool,
 }
 impl Default for UiPreferences {
-    fn default() -> Self { Self { show_favorite_search: true, reset_tab_after_link: false } }
+    fn default() -> Self { Self { show_favorite_search: true, reset_tab_after_link: false, hide_after_link: true } }
 }
 pub fn get_ui_preferences() -> Result<UiPreferences, Box<dyn Error>> {
     let value: Option<String> = Connection::open(db_path()?)?.query_row("SELECT value FROM app_meta WHERE key='ui_preferences'",[],|r|r.get(0)).optional()?;
@@ -3829,6 +3839,11 @@ fn collect_index_entries(root: &Path, output: &mut HashMap<String, PendingIndexE
     complete
 }
 
+fn prune_unregistered_file_index(conn: &Connection, folders: &[String]) -> Result<usize, Box<dyn Error>> {
+    // Literal path boundaries, not LIKE: '%' and '_' in folder names are not wildcards.
+    Ok(conn.execute("DELETE FROM file_index WHERE NOT EXISTS (SELECT 1 FROM json_each(?1) roots WHERE lower(replace(file_index.path,'\\','/')) = lower(rtrim(replace(roots.value,'\\','/'),'/')) OR substr(lower(replace(file_index.path,'\\','/')),1,length(rtrim(replace(roots.value,'\\','/'),'/'))+1) = lower(rtrim(replace(roots.value,'\\','/'),'/')) || '/')", params![serde_json::to_string(folders)?])?)
+}
+
 pub fn rebuild_file_index(folders: &[String]) -> Result<IndexUpdateSummary, Box<dyn Error>> {
     let mut pending = HashMap::new();
     let mut valid_roots = Vec::new();
@@ -3929,6 +3944,9 @@ pub fn rebuild_file_index(folders: &[String]) -> Result<IndexUpdateSummary, Box<
     if !valid_roots.is_empty() {
         tx.execute("INSERT INTO app_meta(key,value) VALUES('file_index_initialized',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![now_string()])?;
     }
+    // Settings may have changed during the scan. Never restore removed roots.
+    let configured: String = tx.query_row("SELECT index_folders FROM settings WHERE id=1",[],|row|row.get(0))?;
+    prune_unregistered_file_index(&tx, &serde_json::from_str::<Vec<String>>(&configured)?)?;
     tx.commit()?;
     Ok(IndexUpdateSummary {
         scanned,
@@ -4217,6 +4235,18 @@ fn unique_stamp() -> u128 {
 
 #[cfg(test)]
 mod board_tests {
+    #[test]
+    fn unregistering_roots_removes_only_their_index_entries() {
+        let conn=Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE file_index(path TEXT); CREATE TABLE favorite_items(target TEXT); INSERT INTO file_index VALUES('C:\\Work'),('C:\\Work\\keep.txt'),('C:\\Workshop\\remove.txt'),('C:\\Old\\remove.txt'),('\\\\server\\share\\keep.txt'); INSERT INTO favorite_items VALUES('C:\\Old\\remove.txt');").unwrap();
+        let roots=vec!["c:/work/".to_string(),"\\\\server\\share".to_string()];
+        assert_eq!(prune_unregistered_file_index(&conn,&roots).unwrap(),2);
+        assert_eq!(conn.query_row("SELECT count(*) FROM file_index",[],|r|r.get::<_,i64>(0)).unwrap(),3);
+        assert_eq!(conn.query_row("SELECT count(*) FROM favorite_items",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(prune_unregistered_file_index(&conn,&[]).unwrap(),3);
+        assert!(serde_json::from_str::<UiPreferences>("{}").unwrap().hide_after_link);
+        assert!(!serde_json::from_str::<UiPreferences>(r#"{"hideAfterLink":false}"#).unwrap().hide_after_link);
+    }
     use super::*;
 
     fn fixture() -> Connection {
@@ -4269,7 +4299,7 @@ mod board_tests {
         let id = add_manual_favorite_in_connection(&conn,"手動リンク","https://manual.test",0).unwrap();
         assert_eq!(conn.query_row("SELECT pane FROM favorite_items WHERE id=?1",params![id],|r|r.get::<_,i64>(0)).unwrap(),0);
         assert!(add_manual_favorite_in_connection(&conn,"重複","https://manual.test",0).is_err());
-        let preferences = UiPreferences {show_favorite_search:false,reset_tab_after_link:true};
+        let preferences = UiPreferences {show_favorite_search:false,reset_tab_after_link:true,hide_after_link:false};
         let loaded: UiPreferences = serde_json::from_str(&serde_json::to_string(&preferences).unwrap()).unwrap();
         assert!(!loaded.show_favorite_search && loaded.reset_tab_after_link);
         let defaults: UiPreferences = serde_json::from_str("{}").unwrap();
