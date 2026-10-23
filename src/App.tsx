@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import "./compact.css";
 import "./board.css";
 import FavoriteBoard from "./FavoriteBoard";
+import { rememberIcon } from './iconCache';
+import { sameRows, createKeyedTaskQueue } from './performanceHelpers';
 
 type ServiceType = "spo" | "asana" | "notion" | "edge" | "folder";
 type UiPreferences = { showFavoriteSearch: boolean; resetTabAfterLink: boolean; hideAfterLink: boolean };
@@ -181,6 +183,13 @@ function createHeadingColors(size: 32 | 64 | 128) {
 }
 
 type FavoriteTextStyle = { color: string; bold: boolean };
+const favoriteStyleQueue = createKeyedTaskQueue<number>();
+const favoriteStyleDrafts = new Map<number, { value: FavoriteTextStyle; revision: number }>();
+const favoriteStyleListeners = new Set<(id: number, value: FavoriteTextStyle) => void>();
+let favoriteStyleRevision = 0;
+function publishFavoriteStyle(id: number, value: FavoriteTextStyle) {
+  favoriteStyleListeners.forEach(listener => listener(id, value));
+}
 let favoriteTextStylesRequest: Promise<Record<string, FavoriteTextStyle>> | undefined;
 function loadFavoriteTextStyles() {
   return favoriteTextStylesRequest ??= invoke<Record<string, FavoriteTextStyle>>("get_favorite_text_styles").catch(error => { favoriteTextStylesRequest = undefined; throw error; });
@@ -197,8 +206,15 @@ function FavoriteCard({ item, displayLabel, iconSrc, headingColors, editing, onD
 }) {
   const [menu, setMenu] = useState<{x:number;y:number}|null>(null);
   const [textStyle, setTextStyle] = useState<FavoriteTextStyle>({color:"",bold:false});
+  const textStyleRef = useRef(textStyle);
   const menuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { let active=true; void loadFavoriteTextStyles().then(styles=>{if(active)setTextStyle(styles[item.id]??{color:"",bold:false});}).catch(console.error); return()=>{active=false;}; },[item.id]);
+  useEffect(() => {
+    let active=true;
+    const update=(id:number,value:FavoriteTextStyle)=>{if(id===item.id){textStyleRef.current=value;setTextStyle(value);}};
+    favoriteStyleListeners.add(update);
+    void loadFavoriteTextStyles().then(styles=>{if(active)update(item.id,favoriteStyleDrafts.get(item.id)?.value??styles[item.id]??{color:"",bold:false});}).catch(console.error);
+    return()=>{active=false;favoriteStyleListeners.delete(update);};
+  },[item.id]);
   useEffect(() => {
     if(!menu)return;
     const close=(event:PointerEvent)=>{if(!menuRef.current?.contains(event.target as Node))setMenu(null);};
@@ -206,9 +222,29 @@ function FavoriteCard({ item, displayLabel, iconSrc, headingColors, editing, onD
     document.addEventListener('pointerdown',close);document.addEventListener('keydown',key,true);
     return()=>{document.removeEventListener('pointerdown',close);document.removeEventListener('keydown',key,true);};
   },[menu]);
-  const saveStyle=async(next:FavoriteTextStyle)=>{
-    try { await invoke('set_favorite_text_style',{id:item.id,...next});const styles=await loadFavoriteTextStyles();styles[item.id]=next;setTextStyle(next); }
-    catch(error){console.error(error);window.alert('文字の設定を保存できませんでした。');}
+  const saveStyle=async(change:Partial<FavoriteTextStyle>|((current:FavoriteTextStyle)=>FavoriteTextStyle))=>{
+    const id=item.id;
+    const current=favoriteStyleDrafts.get(id)?.value??textStyleRef.current;
+    const next=typeof change==='function'?change(current):{...current,...change};
+    const revision=++favoriteStyleRevision;
+    favoriteStyleDrafts.set(id,{value:next,revision});
+    textStyleRef.current=next;
+    publishFavoriteStyle(id,next);
+    try {
+      await favoriteStyleQueue(id,async()=>{
+        await invoke('set_favorite_text_style',{id,...next});
+        const styles=await loadFavoriteTextStyles().catch(()=>null);
+        if(styles)styles[id]=next;
+      });
+      if(favoriteStyleDrafts.get(id)?.revision===revision){favoriteStyleDrafts.delete(id);publishFavoriteStyle(id,next);}
+    } catch(error){
+      console.error(error);
+      if(favoriteStyleDrafts.get(id)?.revision===revision){
+        const styles=await loadFavoriteTextStyles().catch(()=>null);
+        if(favoriteStyleDrafts.get(id)?.revision===revision){favoriteStyleDrafts.delete(id);publishFavoriteStyle(id,styles?.[id]??{color:"",bold:false});}
+      }
+      window.alert('文字の設定を保存できませんでした。最後に保存できた設定を確認してください。');
+    }
   };
   const rgb = item.color?.match(/[a-f\d]{2}/gi)?.map((part) => parseInt(part, 16));
   const luminance = rgb ? rgb.map((value) => { const channel = value / 255; return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4; }) : null;
@@ -220,12 +256,12 @@ function FavoriteCard({ item, displayLabel, iconSrc, headingColors, editing, onD
     return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
   }, []);
   return <div data-favorite-id={item.id} className={`favorite-item ${item.kind}${draggingId === item.id ? " pointer-dragging" : ""}${dropBeforeId === item.id ? " drop-before" : ""}${selected ? " selected-favorite" : ""}`} style={{...headingStyle, '--favorite-text-color':textStyle.color||'inherit','--favorite-text-weight':textStyle.bold?700:400} as React.CSSProperties} onContextMenu={event=>{event.preventDefault();event.stopPropagation();setMenu({x:Math.max(0,Math.min(event.clientX,window.innerWidth-170)),y:Math.max(0,Math.min(event.clientY,window.innerHeight-190))});}} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const dragId = Number(event.dataTransfer.getData("text/plain")) || draggingId; if (dragId) onDropBefore(dragId, item.id); }}>
-    {menu && createPortal(<div ref={menuRef} className="favorite-context-menu" style={{left:menu.x,top:menu.y}} onClick={event=>event.stopPropagation()} onContextMenu={event=>event.preventDefault()}><button onClick={()=>{setMenu(null);onEdit(item.id);}}>名前を変更</button><label>文字色<input aria-label="お気に入りの文字色" type="color" value={textStyle.color||'#334155'} onChange={event=>void saveStyle({...textStyle,color:event.target.value})}/></label><button onClick={()=>void saveStyle({...textStyle,bold:!textStyle.bold})}>{textStyle.bold?'✓ ':''}太字</button><button onClick={()=>void saveStyle({color:'',bold:false})}>文字装飾をリセット</button><button className="delete-column-menu" onClick={()=>{setMenu(null);void onDelete(item.id);}}>削除</button></div>,document.body)}
+    {menu && createPortal(<div ref={menuRef} className="favorite-context-menu" style={{left:menu.x,top:menu.y}} onClick={event=>event.stopPropagation()} onContextMenu={event=>event.preventDefault()}><button onClick={()=>{setMenu(null);onEdit(item.id);}}>名前を変更</button><label>文字色<input aria-label="お気に入りの文字色" type="color" value={textStyle.color||'#334155'} onChange={event=>void saveStyle({color:event.target.value})}/></label><button onClick={()=>void saveStyle(current=>({...current,bold:!current.bold}))}>{textStyle.bold?'✓ ':''}太字</button><button onClick={()=>void saveStyle({color:'',bold:false})}>文字装飾をリセット</button><button className="delete-column-menu" onClick={()=>{setMenu(null);void onDelete(item.id);}}>削除</button></div>,document.body)}
     <span className="drag-handle" onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); onDragStart(item.id); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) onPointerMove(item.id, event.clientX, event.clientY); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); onPointerDrop(item.id, event.clientX, event.clientY); }} title="ここをドラッグして移動">⋮⋮</span>
     {selectionMode ? <button type="button" className={`favorite-select-box${selected ? " checked" : ""}`} onClick={() => onToggleSelect(item.id)}>{selected ? "✓" : ""}</button> : null}
     {item.kind === "link" ? <SourceIcon src={iconSrc} service={item.service ?? "edge"} /> : null}
     {editing ? <input className="favorite-inline-input" defaultValue={item.label} autoFocus onClick={(event)=>event.stopPropagation()} onFocus={(event) => event.currentTarget.select()} onBlur={(event) => void onSave(item, event.currentTarget.value)} onKeyDown={(event) => { event.stopPropagation(); if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} /> :
-      <button className="favorite-content" onClick={() => selectionMode ? onToggleSelect(item.id) : item.kind === "link" && item.target ? onOpen(item) : onEdit(item.id)} onDoubleClick={() => { if (!selectionMode) onEdit(item.id); }} title={selectionMode ? "選択する" : item.kind === "link" ? `${displayLabel}\n${item.target ?? ""}\n使用 ${item.openedCount ?? 0}回 / 最終 ${item.lastOpenedAt ?? "未使用"}` : "クリックで見出し名を変更"}><span className="fav-title">{displayLabel}</span></button>}
+      <button className="favorite-content" onClick={event => { if(event.detail>1)return; selectionMode ? onToggleSelect(item.id) : item.kind === "link" && item.target ? onOpen(item) : onEdit(item.id); }} title={selectionMode ? "選択する" : item.kind === "link" ? `${displayLabel}\n${item.target ?? ""}\n右クリックで名前・文字装飾を変更` : "クリックで見出し名を変更"}><span className="fav-title">{displayLabel}</span></button>}
     {item.kind === "heading" ? <details ref={colorDetailsRef} className="color-picker"><summary title="見出し色を変更" style={{ backgroundColor: item.color }} /><div className="color-palette">{headingColors.map((color) => <button key={color} type="button" style={{ backgroundColor: color }} onClick={(event) => { event.preventDefault(); void onColor(item.id, color); }} title={color} />)}</div></details> : null}
     <button className="favorite-edit" onClick={() => onEdit(item.id)} title="名前を変更">✎</button>
     <button className="favorite-delete" onClick={() => void onDelete(item.id)} title="お気に入りから削除">×</button>
@@ -331,8 +367,13 @@ function App() {
   const [fileResults, setFileResults] = useState<FileSearchResult[]>([]);
   const [webIcons,setWebIcons]=useState<Record<string,string>>({});
   const [fileIcons,setFileIcons]=useState<Record<string,string>>({});
+  const webIconsRef=useRef(webIcons);webIconsRef.current=webIcons;
+  const fileIconsRef=useRef(fileIcons);fileIconsRef.current=fileIcons;
+  const fileIconQueueRef=useRef(Promise.resolve());
+  const missingWebIconsRef=useRef(new Map<string,number>());
   const [indexFoldersText, setIndexFoldersText] = useState("");
   const [indexMessage, setIndexMessage] = useState("");
+  const indexBusyRef=useRef(false);
   const [editingFavoriteId, setEditingFavoriteId] = useState<number | null>(null);
   const [draggingFavoriteId, setDraggingFavoriteId] = useState<number | null>(null);
   const [favoriteDragPreview, setFavoriteDragPreview] = useState<{ x: number; y: number; pane: number; beforeId?: number; lineX?:number; lineY?:number; lineWidth?:number } | null>(null);
@@ -353,6 +394,12 @@ function App() {
   const [deletedFavorite, setDeletedFavorite] = useState<FavoriteItem | null>(null);
   const [fileIndexReady, setFileIndexReady] = useState(false);
   const [fileFilter, setFileFilter] = useState('documents');
+  const searchContext=useMemo(()=>({query,mode:settings.searchMode,filter:fileFilter}),[query,settings.searchMode,fileFilter]);
+  const searchContextRef=useRef(searchContext);searchContextRef.current=searchContext;
+  const searchRequestRef=useRef(0);
+  const dataBusyRef=useRef(false);
+  const [dataBusy,setDataBusy]=useState(false);
+  const toastTimerRef=useRef<number|undefined>(undefined);
   const requestedWebIconsRef = useRef(new Set<string>());
   const iconQueueRef = useRef(Promise.resolve());
   const [extensionSyncMessage,setExtensionSyncMessage]=useState("10秒ごとに受信確認＋新規訪問時に自動送信");
@@ -385,33 +432,55 @@ function App() {
   };
 
   const loadSearchResults = async () => {
-    const history = await invoke<SearchResult[]>("fetch_history");
-    setResults(history);
+    if(dataBusyRef.current)return;
+    const context=searchContextRef.current;
+    const request=++searchRequestRef.current;
+    try {
+      if(context.mode==='web') {
+        const history=await invoke<SearchResult[]>('search_history',{query:context.query});
+        if(request===searchRequestRef.current && context===searchContextRef.current)setResults(previous=>sameRows(previous,history)?previous:history);
+      } else {
+        const files=await invoke<FileSearchResult[]>('search_file_index',{query:context.query,filter:context.filter});
+        if(request===searchRequestRef.current && context===searchContextRef.current)setFileResults(previous=>sameRows(previous,files)?previous:files);
+      }
+    } catch(error) { if(context===searchContextRef.current)showToast(`検索できませんでした: ${String(error)}`); }
   };
 
   const loadFavorites = async () => {
     const items=await invoke<FavoriteItem[]>("list_favorite_items");
-    setFavoriteItems(items);
+    setFavoriteItems(previous=>sameRows(previous,items)?previous:items);
     const targets=new Set(items.filter(item=>item.kind==='link').map(item=>item.target?.toLowerCase()));
-    setResults(current=>current.map(item=>({...item,isFavorite:targets.has(item.url.toLowerCase())?1:0})));
-    setFileResults(current=>current.map(item=>({...item,isFavorite:targets.has(item.path.toLowerCase())})));
+    setResults(current=>{const next=current.map(item=>({...item,isFavorite:targets.has(item.url.toLowerCase())?1:0}));return sameRows(current,next)?current:next;});
+    setFileResults(current=>{const next=current.map(item=>({...item,isFavorite:targets.has(item.path.toLowerCase())}));return sameRows(current,next)?current:next;});
   };
   const loadFavoriteLayout = async () => {
     const [tabs, columns] = await Promise.all([invoke<FavoriteTab[]>("list_favorite_tabs"), invoke<FavoriteColumn[]>("list_favorite_columns")]);
     setFavoriteTabs(tabs); setFavoriteColumns(columns); setActiveTabId((current) => tabs.some((tab) => tab.id === current) ? current : (tabs[0]?.id ?? 1));
   };
-  const showToast = (message:string) => { setToastMessage(message); window.setTimeout(() => setToastMessage(""), 3500); };
+  const showToast = (message:string) => { setToastMessage(message);window.clearTimeout(toastTimerRef.current);toastTimerRef.current=window.setTimeout(() => setToastMessage(""), 6500); };
+  useEffect(()=>{
+    const failed=(event:PromiseRejectionEvent)=>{event.preventDefault();console.error('操作に失敗しました',event.reason);showToast(`操作を完了できませんでした: ${String(event.reason)}`);};
+    window.addEventListener('unhandledrejection',failed);
+    return()=>{window.removeEventListener('unhandledrejection',failed);window.clearTimeout(toastTimerRef.current);};
+  },[]);
+  const runDataTool=async(restore:boolean)=>{
+    if(dataBusyRef.current)return;
+    if(restore&&!confirm('バックアップから復元しますか？現在のデータは復元直前に自動退避します。'))return;
+    dataBusyRef.current=true;setDataBusy(true);++searchRequestRef.current;
+    try {const path=await invoke<string|null>(restore?'restore_backup':'create_backup');if(path){if(restore){window.location.reload();return;}showToast(`バックアップを保存しました: ${path}`);}}
+    catch(error){showToast(`バックアップ${restore?'復元':'作成'}に失敗しました: ${String(error)}`);}
+    finally{dataBusyRef.current=false;setDataBusy(false);}
+  };
 
   const loadEdgeImportStatus = async (reloadOnRevisionChange = false) => {
     const status = await invoke<EdgeImportStatus>("get_edge_import_status");
-    setEdgeImportStatus(status);
+    setEdgeImportStatus(previous=>previous.revision===status.revision && previous.running===status.running && previous.message===status.message && previous.lastUpdatedAt===status.lastUpdatedAt?previous:status);
 
     if (reloadOnRevisionChange && status.revision !== statusRevisionRef.current) {
       const previousRevision = statusRevisionRef.current;
       statusRevisionRef.current = status.revision;
 
       if (previousRevision !== 0 && status.lastOutcome === "success") {
-        setQuery("");
         await Promise.all([loadSearchResults(), loadFavorites()]);
       }
     } else {
@@ -461,11 +530,7 @@ function App() {
 
   useEffect(() => {
     const handler = window.setTimeout(() => {
-      if (settings.searchMode === "web") {
-        invoke<SearchResult[]>("search_history", { query }).then(setResults).catch((error) => console.error("search_history error", error));
-      } else {
-        invoke<FileSearchResult[]>("search_file_index", { query, filter: fileFilter }).then(setFileResults).catch((error) => console.error("search_file_index error", error));
-      }
+      void loadSearchResults();
     }, 200);
 
     return () => window.clearTimeout(handler);
@@ -473,13 +538,19 @@ function App() {
 
   useEffect(()=>{
     const urls=[...new Set([...favoriteItems.filter((f)=>f.service!=="folder").map((f)=>f.target??""),...results.map((r)=>r.url)])].filter(Boolean).slice(0,300);
-    const pending = urls.filter(url => !requestedWebIconsRef.current.has(url));
+    const now=Date.now();
+    for(const [url,until] of missingWebIconsRef.current)if(until<=now)missingWebIconsRef.current.delete(url);
+    const pending = urls.filter(url => !webIconsRef.current[url] && !missingWebIconsRef.current.has(url) && !requestedWebIconsRef.current.has(url));
     pending.forEach(url => requestedWebIconsRef.current.add(url));
     iconQueueRef.current = iconQueueRef.current.catch(() => {}).then(async () => {
       for (let offset = 0; offset < pending.length; offset += 4) {
         await Promise.all(pending.slice(offset, offset + 4).map(async url => {
-          try { const icon = await invoke<string|null>('get_edge_favicon', { url }); if (icon) setWebIcons(value => ({ ...value, [url]: icon })); }
-          catch { /* Use the site's favicon fallback without retrying every render. */ }
+          try {
+            const icon = await invoke<string|null>('get_edge_favicon', { url });
+            if (icon) setWebIcons(value => rememberIcon(value,url,icon));
+            else {missingWebIconsRef.current.set(url,Date.now()+60000);if(missingWebIconsRef.current.size>512)missingWebIconsRef.current.delete(missingWebIconsRef.current.keys().next().value!);}
+          } catch {missingWebIconsRef.current.set(url,Date.now()+60000);if(missingWebIconsRef.current.size>512)missingWebIconsRef.current.delete(missingWebIconsRef.current.keys().next().value!);}
+          finally {requestedWebIconsRef.current.delete(url);}
         }));
       }
     });
@@ -487,25 +558,25 @@ function App() {
   useEffect(()=>{
     const paths=[...new Set([...fileResults.map(file=>file.path),...favoriteItems.filter(item=>item.service==='folder'&&item.target).map(item=>item.target!)])];
     let active=true;
-    iconQueueRef.current=iconQueueRef.current.catch(()=>{}).then(async()=>{
-      for(const path of paths){if(!active)break;if(fileIcons[path])continue;try{const icon=await invoke<string|null>('get_file_icon',{path});if(active&&icon)setFileIcons(value=>({...value,[path]:icon}));}catch(error){console.error('get_file_icon',error);}}
+    fileIconQueueRef.current=fileIconQueueRef.current.catch(()=>{}).then(async()=>{
+      for(const path of paths){if(!active)break;if(fileIconsRef.current[path])continue;try{const icon=await invoke<string|null>('get_file_icon',{path});if(active&&icon)setFileIcons(value=>rememberIcon(value,path,icon));}catch(error){console.error('get_file_icon',error);}}
     });
     return()=>{active=false;};
   },[fileResults,favoriteItems]);
 
   useEffect(() => {
+    if(!settingsOpen)return;
+    let busy=false;
     const intervalId = window.setInterval(() => {
-      void loadEdgeImportStatus(true).catch((error) => {
-        console.error("get_edge_import_status error", error);
-      });
-      if (settingsOpen) void loadAppLogs().catch((error) => console.error("get_app_logs error", error));
-    }, 1000);
+      if(busy||dataBusyRef.current)return;busy=true;
+      void loadAppLogs().catch((error) => console.error("get_app_logs error", error)).finally(()=>{busy=false;});
+    }, 5000);
 
     return () => window.clearInterval(intervalId);
   }, [settingsOpen]);
 
-  useEffect(()=>{let busy=false;const sync=async()=>{if(busy)return;busy=true;try{const count=await invoke<number>("import_extension_history");if(count>0){setExtensionSyncMessage(`拡張機能から${count}件取り込みました`);setResults(await invoke<SearchResult[]>("search_history",{query}));await loadFavorites();}}catch(error){console.error("extension history sync",error);}finally{busy=false;}};void sync();const id=window.setInterval(()=>void sync(),1000);return()=>window.clearInterval(id);},[query]);
-  useEffect(()=>{const load=()=>void invoke<ExtensionConnectionStatus>("extension_connection_status").then(setExtensionConnection).catch(()=>{});load();const id=window.setInterval(load,10000);return()=>window.clearInterval(id);},[]);
+  useEffect(()=>{let busy=false,disposed=false;const sync=async()=>{if(busy||dataBusyRef.current)return;busy=true;try{const count=await invoke<number>("import_extension_history");if(count>0&&!disposed){setExtensionSyncMessage(`拡張機能から${count}件取り込みました`);await loadSearchResults();await loadFavorites();}}catch(error){console.error("extension history sync",error);}finally{busy=false;}};void sync();const id=window.setInterval(()=>void sync(),1000);return()=>{disposed=true;window.clearInterval(id);};},[]);
+  useEffect(()=>{const load=()=>void invoke<ExtensionConnectionStatus>("extension_connection_status").then(status=>setExtensionConnection(previous=>previous.connected===status.connected&&previous.lastContact===status.lastContact?previous:status)).catch(()=>{});load();const id=window.setInterval(load,10000);return()=>window.clearInterval(id);},[]);
 
   useEffect(() => {
     if (!fileIndexReady || settings.indexFolders.length === 0) return;
@@ -518,8 +589,11 @@ function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       const appWindow = getCurrentWindow();
-      const scale = await appWindow.scaleFactor();
-      unlisten = await appWindow.onResized(({ payload }) => {
+      let resizeSequence=0;
+      unlisten = await appWindow.onResized(async ({ payload }) => {
+        const sequence=++resizeSequence;
+        const scale=await appWindow.scaleFactor();
+        if(sequence!==resizeSequence)return;
         if (disposed) return;
         const size = `${Math.round(payload.width / scale)}x${Math.round(payload.height / scale)}`;
         setCurrentWindowSize(size);
@@ -535,7 +609,7 @@ function App() {
     return () => { disposed = true; unlisten?.(); if (resizeSaveTimerRef.current) window.clearTimeout(resizeSaveTimerRef.current); };
   }, []);
 
-  const loadAppLogs = async () => setAppLogs(await invoke<AppLogEntry[]>("get_app_logs"));
+  const loadAppLogs = async () => {const entries=await invoke<AppLogEntry[]>("get_app_logs");setAppLogs(previous=>previous.length===entries.length && previous[0]?.id===entries[0]?.id ? previous:entries);};
   const filteredResults = useMemo(() => results, [results]);
   const headingColors = useMemo(() => createHeadingColors(settings.headingPaletteSize), [settings.headingPaletteSize]);
   const favoriteDisplayLabel = (item: FavoriteItem) => item.label;
@@ -550,6 +624,7 @@ function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if(dataBusyRef.current){event.preventDefault();event.stopImmediatePropagation();return;}
       if (event.defaultPrevented) return;
       const active = document.activeElement as HTMLElement | null;
       if (active && active.id !== 'search-input' && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable)) return;
@@ -678,11 +753,12 @@ openWebLink(item.url)
       setCurrentWindowSize(saved.windowSize);
       window.setTimeout(() => { programmaticResizeRef.current = false; }, 800);
       await loadFavorites();
-      if(saved.searchMode==='folder')setFileResults(await invoke<FileSearchResult[]>('search_file_index',{query,filter:fileFilter}));
+      await loadSearchResults();
       setSettingsOpen(false);
       localStorage.removeItem("quickSettings");
     } catch (error) {
       console.error("Failed to save settings", error);
+      showToast(`設定を保存できませんでした: ${String(error)}`);
     } finally {
       setSettingsSaving(false);
     }
@@ -738,15 +814,16 @@ openWebLink(item.url)
   };
 
   const saveFavoriteLabel = async (item: FavoriteItem, label: string) => {
-    await invoke("rename_favorite_item", { id: item.id, label }); setEditingFavoriteId(null); await loadFavorites();
+    try {await invoke("rename_favorite_item", { id: item.id, label }); setEditingFavoriteId(null); await loadFavorites();}
+    catch(error){showToast(`名前を保存できませんでした: ${String(error)}`);}
   };
   const removeFavorite = async (id: number) => {
     const item = favoriteItems.find((value) => value.id === id); if (!item) return;
+    try {await invoke("delete_favorite_item", { id: item.id });}
+    catch(error){showToast(`削除できませんでした: ${String(error)}`);return;}
     if (deleteTimerRef.current) window.clearTimeout(deleteTimerRef.current);
-    await invoke("delete_favorite_item", { id: item.id });
     setFavoriteItems((items) => items.filter((value) => value.id !== id)); setDeletedFavorite(item);
     void loadSearchResults();
-    if (settings.searchMode === "folder") void invoke<FileSearchResult[]>("search_file_index", { query }).then(setFileResults);
     deleteTimerRef.current = window.setTimeout(() => { setDeletedFavorite(null); deleteTimerRef.current = null; }, 10000);
   };
   const undoFavoriteDelete = async () => { if (deleteTimerRef.current) window.clearTimeout(deleteTimerRef.current); deleteTimerRef.current = null; if (deletedFavorite) { await invoke("restore_deleted_favorite", { id: deletedFavorite.id }); await loadFavorites(); void loadSearchResults(); } setDeletedFavorite(null); };
@@ -799,9 +876,20 @@ openWebLink(item.url)
     await invoke("save_settings", { settings: next });
   };
   const rebuildIndex = async () => {
-    const folders = indexFoldersText.split("\n").map((v) => v.trim()).filter(Boolean).slice(0, 10); setIndexMessage("インデックス作成中…");
-    try { const summary = await invoke<IndexUpdateSummary>("rebuild_file_index", { folders }); setIndexMessage(`確認${summary.scanned}件／追加${summary.added}・変更${summary.updated}・削除${summary.deleted}件`); setFileIndexReady(true); await loadAppLogs(); }
+    if(indexBusyRef.current){showToast('インデックスを更新中です。完了をお待ちください。');return;}
+    const folders = indexFoldersText.split("\n").map((v) => v.trim()).filter(Boolean).slice(0, 10);
+    if(JSON.stringify(folders)!==JSON.stringify(persistedSettings.indexFolders)&&!confirm('更新前に、入力した対象フォルダを保存します。\n設定画面でキャンセルしても、このフォルダ登録は戻りません。\n対象から外したフォルダは検索結果から除外しますが、実ファイルとお気に入りは削除しません。\n保存して更新しますか？'))return;
+    indexBusyRef.current=true;setIndexMessage("インデックス作成中…");
+    try {
+      // Updating explicitly commits the folder list, not unrelated draft settings.
+      const response=await invoke<SettingsResponse>('get_settings');
+      const saved=await invoke<Settings>('save_settings',{settings:{...response.settings,indexFolders:folders}});
+      setSettings(current=>({...current,indexFolders:saved.indexFolders}));
+      setPersistedSettings(current=>({...current,indexFolders:saved.indexFolders}));
+      showToast('対象フォルダを保存して更新します（キャンセルしてもフォルダ登録は戻りません）');
+      const summary = await invoke<IndexUpdateSummary>("rebuild_file_index", { folders:saved.indexFolders }); setIndexMessage(`確認${summary.scanned}件／追加${summary.added}・変更${summary.updated}・削除${summary.deleted}件`); setFileIndexReady(true); await loadAppLogs(); await loadSearchResults(); }
     catch (error) { setIndexMessage(`作成に失敗しました: ${String(error)}`); }
+    finally {indexBusyRef.current=false;}
   };
   const clearAppLogs = async () => { await invoke("clear_app_logs"); setAppLogs([]); };
   const toggleFileFavorite = async (file: FileSearchResult) => {
@@ -878,6 +966,7 @@ openWebLink(item.url)
     <div className="app-shell">
       <div className="window-drag-region" data-tauri-drag-region />
       <div className="app-container" ref={appContainerRef}>
+        {dataBusy&&createPortal(<div role="status" style={{position:'fixed',inset:0,zIndex:20000,background:'#ffffffcc',display:'grid',placeItems:'center'}}>バックアップ処理中…</div>,document.body)}
         <div className="left-pane" style={{ flexBasis: `${settings.leftPanePercent}%` }}>
           <div className="search-card">
             <div className="header-block">
@@ -972,8 +1061,8 @@ openWebLink(item.url)
                           <textarea rows={6} value={quickKeywordsText} onChange={(e)=>setQuickKeywordsText(e.target.value)}/>
                         </section>
                         <section className="settings-section data-tools-section">
-<div className="settings-section-title"><div><strong>バックアップと診断</strong><small>お気に入り・レイアウト・設定を安全に保管します</small></div><span className="app-version">v0.3.7</span></div>
-                          <div className="data-tool-actions"><button type="button" title="現在のDBを整合性のある状態で1ファイルへ保存します。お気に入り、タブ、列、色、設定をすべて含みます。" onClick={async()=>{const path=await invoke<string|null>("create_backup");if(path)showToast(`バックアップを保存しました: ${path}`);}}>バックアップ作成</button><button type="button" title="バックアップから復元します。復元直前の現在DBも自動退避し、完了後に画面を再読み込みします。" onClick={async()=>{if(!confirm("バックアップから復元しますか？"))return;const path=await invoke<string|null>("restore_backup");if(path)window.location.reload();}}>復元</button><button type="button" title="個人のURLやファイル名を含まない診断概要をクリップボードへコピーします。" onClick={async()=>{const value=await invoke<string>("diagnostics_text");await navigator.clipboard.writeText(value);showToast("診断情報をコピーしました");}}>診断情報をコピー</button></div>
+<div className="settings-section-title"><div><strong>バックアップと診断</strong><small>お気に入り・レイアウト・設定を安全に保管します</small></div><span className="app-version">v0.3.8</span></div>
+                          <div className="data-tool-actions"><button type="button" title="お気に入り・レイアウト・設定を安全に保存します。使用中DB自身は保存先に指定できません。起動中は日ごとの自動バックアップも作成し、直近7日分を保持します。" onClick={()=>void runDataTool(false)}>バックアップ作成</button><button type="button" title="このアプリのバックアップか検証してから復元します。現在DBを自動退避し、失敗時は元へ戻します。インデックス更新中は完了を待ってください。" onClick={()=>void runDataTool(true)}>復元</button><button type="button" title="個人のURLやファイル名を含まない診断概要をクリップボードへコピーします。" onClick={async()=>{const value=await invoke<string>("diagnostics_text");await navigator.clipboard.writeText(value);showToast("診断情報をコピーしました");}}>診断情報をコピー</button></div>
                         </section>
                         <div className="edge-import-debug app-log-panel">
                             <div className="edge-import-debug-title"><span>ログ <SettingHelp text="Edge履歴やフォルダインデックスなど、アプリ内処理の結果を確認できます。最新500件だけを保存し、それより古いログは自動削除されるため、放置しても無制限には増えません。" /></span><button type="button" onClick={() => void clearAppLogs()}>クリア</button></div>

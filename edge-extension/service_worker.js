@@ -2,9 +2,9 @@ const HOST = 'com.t10.search_launcher_history';
 let sending = Promise.resolve();
 let syncing = null;
 
-function sendNative(records, fullSync = false, favorite = undefined) {
+function sendNative(records, fullSync = false, favorite = undefined, fullSyncComplete = false) {
   const task = sending.catch(() => {}).then(() => new Promise((resolve, reject) => {
-    chrome.runtime.sendNativeMessage(HOST, { records, fullSync, favorite }, response => {
+    chrome.runtime.sendNativeMessage(HOST, { records, fullSync, favorite, fullSyncComplete, protocolVersion: 2 }, response => {
       const error = chrome.runtime.lastError;
       if (error) reject(new Error(error.message)); else if (!response?.ok) reject(new Error('Local bridge rejected the message')); else resolve(response);
     });
@@ -26,14 +26,16 @@ function syncHistory() {
   syncing = (async () => {
     const handshake = await sendNative([]);
     await configureAlarm(handshake.syncIntervalSeconds);
-    const stored = await chrome.storage.local.get('lastSyncTime');
-    const fullSync = Boolean(handshake.fullSyncRequested);
+    const stored = await chrome.storage.local.get(['lastSyncTime', 'fullSyncPending']);
+    const fullSync = Boolean(handshake.fullSyncRequested || stored.fullSyncPending);
+    if(fullSync) await chrome.storage.local.set({fullSyncPending:true});
     const syncStarted = Date.now();
     const startTime = fullSync ? 0 : stored.lastSyncTime ? Math.max(0, stored.lastSyncTime - 300000) : 0;
     const records = await chrome.history.search({ text: '', startTime, maxResults: 100000 });
     if (!records.length) await sendNative([], fullSync);
     for (let index = 0; index < records.length; index += 2000) await sendNative(records.slice(index, index + 2000), fullSync);
-    await chrome.storage.local.set({ lastSyncTime: syncStarted });
+    if(fullSync) await sendNative([], true, undefined, true);
+    await chrome.storage.local.set({ lastSyncTime: syncStarted, fullSyncPending:false });
   })().finally(() => { syncing = null; });
   return syncing;
 }

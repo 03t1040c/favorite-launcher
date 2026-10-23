@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fs;
 #[cfg(windows)]
@@ -54,10 +54,24 @@ static EDGE_IMPORT_STATUS: Lazy<Mutex<EdgeImportStatus>> = Lazy::new(|| {
         debug_log: Vec::new(),
     })
 });
-static FAVICON_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-static FILE_ICON_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+const ICON_CACHE_ENTRIES: usize = 512;
+const ICON_CACHE_BYTES: usize = 16 * 1024 * 1024;
+#[derive(Default)]
+struct IconMemoryCache { values: HashMap<String, Option<String>>, order: VecDeque<String>, bytes: usize }
+impl IconMemoryCache {
+    fn get(&self,key:&str)->Option<&Option<String>> {self.values.get(key)}
+    fn insert(&mut self,key:String,value:Option<String>) {
+        if let Some(old)=self.values.remove(&key) {self.bytes-=key.len()+old.as_ref().map_or(0,String::len);self.order.retain(|entry|entry!=&key);}
+        let size=key.len()+value.as_ref().map_or(0,String::len);
+        if size>ICON_CACHE_BYTES {return;}
+        while self.values.len()>=ICON_CACHE_ENTRIES || self.bytes+size>ICON_CACHE_BYTES {
+            if let Some(old_key)=self.order.pop_front() {if let Some(old)=self.values.remove(&old_key) {self.bytes-=old_key.len()+old.as_ref().map_or(0,String::len);}} else {break;}
+        }
+        self.bytes+=size;self.order.push_back(key.clone());self.values.insert(key,value);
+    }
+}
+static FAVICON_CACHE: Lazy<Mutex<IconMemoryCache>> = Lazy::new(||Mutex::new(IconMemoryCache::default()));
+static FILE_ICON_CACHE: Lazy<Mutex<IconMemoryCache>> = Lazy::new(||Mutex::new(IconMemoryCache::default()));
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -865,7 +879,7 @@ pub fn save_settings(settings: AppSettings) -> Result<AppSettings, Box<dyn Error
     let path = db_path()?;
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
-    let conn = connection.transaction()?;
+    let conn = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let sanitized = settings.sanitized();
     let folder_json = serde_json::to_string(&sanitized.index_folders)?;
     let previous_roots: Option<String> = conn.query_row("SELECT value FROM app_meta WHERE key='file_index_configured_roots'",[],|row|row.get(0)).optional()?;
@@ -2628,6 +2642,10 @@ pub fn fetch_history() -> Result<Vec<SearchRecord>, Box<dyn Error>> {
     collect_search_rows_tolerant(rows)
 }
 
+fn escape_like(value: &str) -> String {
+    value.replace('\\',"\\\\").replace('%',"\\%").replace('_',"\\_")
+}
+
 pub fn search_history(query: &str) -> Result<Vec<SearchRecord>, Box<dyn Error>> {
     let path = db_path()?;
     let conn = Connection::open(path)?;
@@ -2645,8 +2663,8 @@ pub fn search_history(query: &str) -> Result<Vec<SearchRecord>, Box<dyn Error>> 
 
     for term in terms.iter() {
         where_clauses
-            .push("(lower(title) LIKE ? OR lower(url) LIKE ? OR lower(coalesce(site, '')) LIKE ?)");
-        let pattern = format!("%{}%", term.replace('%', "\\%"));
+            .push("(lower(title) LIKE ? ESCAPE '\\' OR lower(url) LIKE ? ESCAPE '\\' OR lower(coalesce(site, '')) LIKE ? ESCAPE '\\')");
+        let pattern = format!("%{}%", escape_like(term));
         params_vec.push(pattern.clone());
         params_vec.push(pattern.clone());
         params_vec.push(pattern);
@@ -2656,14 +2674,14 @@ pub fn search_history(query: &str) -> Result<Vec<SearchRecord>, Box<dyn Error>> 
         "SELECT id, service, title, site, url, first_seen, last_access, access_count, EXISTS(SELECT 1 FROM favorite_items f WHERE f.kind='link' AND f.deleted_at IS NULL AND lower(f.target)=lower(history.url))
          FROM history
          WHERE {} AND id = (SELECT h2.id FROM history h2 WHERE h2.url = history.url ORDER BY COALESCE(h2.last_access, '') DESC, h2.id DESC LIMIT 1)
-         ORDER BY CASE WHEN lower(title)=? THEN 0 WHEN lower(title) LIKE ? THEN 1 WHEN lower(url) LIKE ? THEN 2 ELSE 3 END,
+         ORDER BY CASE WHEN lower(title)=? THEN 0 WHEN lower(title) LIKE ? ESCAPE '\\' THEN 1 WHEN lower(url) LIKE ? ESCAPE '\\' THEN 2 ELSE 3 END,
                   CASE WHEN EXISTS(SELECT 1 FROM favorite_items f WHERE f.kind='link' AND f.deleted_at IS NULL AND lower(f.target)=lower(history.url)) THEN 0 ELSE 1 END,
                   last_access DESC, access_count DESC LIMIT 200",
         where_clauses.join(" AND ")
     );
     params_vec.push(normalized.clone());
-    params_vec.push(format!("{}%", normalized.replace('%', "\\%")));
-    params_vec.push(format!("%{}%", normalized.replace('%', "\\%")));
+    params_vec.push(format!("{}%", escape_like(&normalized)));
+    params_vec.push(format!("%{}%", escape_like(&normalized)));
 
     let mut stmt = conn.prepare(&sql)?;
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -2841,12 +2859,36 @@ pub fn clear_app_logs() -> Result<(), Box<dyn Error>> {
 }
 
 fn vacuum_database_to(destination: &Path) -> Result<(), Box<dyn Error>> {
-    if destination.exists() {
-        fs::remove_file(destination)?;
+    copy_database_safely(&db_path()?, destination)
+}
+
+fn copy_database_safely(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    let source_path = fs::canonicalize(source)?;
+    if destination.exists() && source_path.to_string_lossy().eq_ignore_ascii_case(&fs::canonicalize(destination)?.to_string_lossy()) {
+        return Err("使用中のDBやコピー元自身を保存先には指定できません。別のファイル名を選んでください。".into());
     }
-    let conn = Connection::open(db_path()?)?;
-    let quoted = destination.to_string_lossy().replace('\'', "''");
-    conn.execute_batch(&format!("VACUUM INTO '{}';", quoted))?;
+    let source = Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut destination = Connection::open(destination)?;
+    destination.busy_timeout(Duration::from_secs(5))?;
+    let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
+    // One SQLite backup transaction; never unlink or overwrite the live DB file.
+    let started=std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(60) {
+        match backup.step(256)? {
+            rusqlite::backup::StepResult::Done => return Ok(()),
+            rusqlite::backup::StepResult::More => {},
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    Err("バックアップ処理がタイムアウトしました。DBは置き換えられていません。時間をおいて再試行してください。".into())
+}
+
+fn validate_launcher_backup(conn: &Connection) -> Result<(), Box<dyn Error>> {
+    let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if check != "ok" { return Err("バックアップファイルが破損しています。".into()); }
+    for sql in ["SELECT id,url,title FROM history LIMIT 0", "SELECT id,kind,label,target,pane FROM favorite_items LIMIT 0", "SELECT id FROM settings LIMIT 0", "SELECT id,name FROM favorite_tabs LIMIT 0", "SELECT id,tab_id FROM favorite_columns LIMIT 0"] {
+        conn.prepare(sql).map_err(|_| "このアプリの対応バックアップではありません。現在のデータは変更していません。")?;
+    }
     Ok(())
 }
 
@@ -2873,37 +2915,45 @@ pub fn restore_backup() -> Result<Option<String>, Box<dyn Error>> {
     else {
         return Ok(None);
     };
-    let check = Connection::open(&source)?
-        .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))?;
-    if check != "ok" {
-        return Err("バックアップファイルが破損しています。".into());
-    }
+    validate_launcher_backup(&Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?)?;
     let current = db_path()?;
+    if fs::canonicalize(&source)?.to_string_lossy().eq_ignore_ascii_case(&fs::canonicalize(&current)?.to_string_lossy()) { return Err("使用中のDB自身は復元できません。".into()); }
     let safety = current.with_extension(format!(
         "before-restore-{}.db",
-        Local::now().format("%Y%m%d-%H%M%S")
+        Local::now().format("%Y%m%d-%H%M%S-%f")
     ));
     vacuum_database_to(&safety)?;
-    fs::copy(&source, &current)?;
-    init_and_seed_db()?;
+    copy_database_safely(&source, &current)?;
+    if let Err(error) = init_and_seed_db() {
+        copy_database_safely(&safety, &current).map_err(|rollback| format!("復元失敗: {error}。自動復旧も失敗: {rollback}。退避先: {}",safety.display()))?;
+        return Err(format!("復元に失敗したため元のデータへ戻しました: {error}").into());
+    }
     Ok(Some(safety.to_string_lossy().to_string()))
 }
 
 pub fn create_automatic_backup() -> Result<(), Box<dyn Error>> {
+    // Validate once per successful snapshot fingerprint, not every hourly check.
+    static VERIFIED: Lazy<Mutex<Option<(PathBuf,u64,SystemTime)>>> = Lazy::new(||Mutex::new(None));
     let dir = db_path()?
         .parent()
         .ok_or("DB保存先がありません")?
         .join("backups");
     fs::create_dir_all(&dir)?;
     let today = dir.join(format!("auto-{}.db", Local::now().format("%Y%m%d")));
-    if !today.exists() {
+    let fingerprint=fs::metadata(&today).ok().and_then(|meta|meta.modified().ok().map(|modified|(today.clone(),meta.len(),modified)));
+    let already_verified=fingerprint.as_ref().map(|current|VERIFIED.lock().map(|last|last.as_ref()==Some(current)).unwrap_or(false)).unwrap_or(false);
+    if already_verified {return Ok(());}
+    let healthy = today.exists() && Connection::open_with_flags(&today,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map(|conn|validate_launcher_backup(&conn).is_ok()).unwrap_or(false);
+    if !healthy {
         vacuum_database_to(&today)?;
+        validate_launcher_backup(&Connection::open_with_flags(&today,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?)?;
     }
+    if let Ok(mut verified)=VERIFIED.lock() {*verified=fs::metadata(&today).ok().and_then(|meta|meta.modified().ok().map(|modified|(today.clone(),meta.len(),modified)));}
     let mut files = fs::read_dir(&dir)?
         .flatten()
         .filter_map(|e| {
             let p = e.path();
-            if p.extension().and_then(|v| v.to_str()) == Some("db") {
+            if p.extension().and_then(|v| v.to_str()) == Some("db") && p.file_name().and_then(|v|v.to_str()).map(|name|name.starts_with("auto-")).unwrap_or(false) {
                 Some(p)
             } else {
                 None
@@ -3640,6 +3690,7 @@ pub fn get_edge_favicon(url: &str) -> Result<Option<String>, Box<dyn Error>> {
             "INSERT INTO web_icon_cache(page_url,icon_data,updated_at) VALUES(?1,?2,?3) ON CONFLICT(page_url) DO UPDATE SET icon_data=excluded.icon_data,updated_at=excluded.updated_at",
             params![url, icon, now_string()],
         )?;
+        conn.execute("DELETE FROM web_icon_cache WHERE page_url NOT IN (SELECT page_url FROM web_icon_cache ORDER BY updated_at DESC,rowid DESC LIMIT 512)",[])?;
         if let Ok(mut cache) = FAVICON_CACHE.lock() {
             cache.insert(url.to_string(), Some(icon.clone()));
         }
@@ -3844,7 +3895,23 @@ fn prune_unregistered_file_index(conn: &Connection, folders: &[String]) -> Resul
     Ok(conn.execute("DELETE FROM file_index WHERE NOT EXISTS (SELECT 1 FROM json_each(?1) roots WHERE lower(replace(file_index.path,'\\','/')) = lower(rtrim(replace(roots.value,'\\','/'),'/')) OR substr(lower(replace(file_index.path,'\\','/')),1,length(rtrim(replace(roots.value,'\\','/'),'/'))+1) = lower(rtrim(replace(roots.value,'\\','/'),'/')) || '/')", params![serde_json::to_string(folders)?])?)
 }
 
+fn prune_if_scan_roots_changed(conn:&Connection,scanned:&[String],configured:&[String])->Result<usize,Box<dyn Error>> {
+    let normalize=|roots:&[String]|->HashSet<String>{roots.iter().map(|root|root.replace('\\',"/").trim_end_matches('/').to_ascii_lowercase()).collect()};
+    if normalize(scanned)==normalize(configured) {return Ok(0);}
+    prune_unregistered_file_index(conn,configured)
+}
+
 pub fn rebuild_file_index(folders: &[String]) -> Result<IndexUpdateSummary, Box<dyn Error>> {
+    if folders.is_empty() {
+        let mut conn=Connection::open(db_path()?)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let tx=conn.transaction()?;
+        let configured:String=tx.query_row("SELECT index_folders FROM settings WHERE id=1",[],|row|row.get(0))?;
+        let roots=serde_json::from_str::<Vec<String>>(&configured)?;
+        let deleted=prune_if_scan_roots_changed(&tx,folders,&roots)?;
+        tx.commit()?;
+        return Ok(IndexUpdateSummary{scanned:0,added:0,updated:0,deleted});
+    }
     let mut pending = HashMap::new();
     let mut valid_roots = Vec::new();
     let mut incomplete_roots = Vec::new();
@@ -3946,7 +4013,7 @@ pub fn rebuild_file_index(folders: &[String]) -> Result<IndexUpdateSummary, Box<
     }
     // Settings may have changed during the scan. Never restore removed roots.
     let configured: String = tx.query_row("SELECT index_folders FROM settings WHERE id=1",[],|row|row.get(0))?;
-    prune_unregistered_file_index(&tx, &serde_json::from_str::<Vec<String>>(&configured)?)?;
+    prune_if_scan_roots_changed(&tx,folders,&serde_json::from_str::<Vec<String>>(&configured)?)?;
     tx.commit()?;
     Ok(IndexUpdateSummary {
         scanned,
@@ -3982,8 +4049,8 @@ fn search_file_rows(conn: &Connection, query: &str, filter: &str) -> Result<Vec<
     let mut clauses = Vec::new();
     let mut values = Vec::new();
     for term in terms {
-        clauses.push("(lower(i.name) LIKE ? OR lower(i.path) LIKE ?)");
-        let p = format!("%{}%", term);
+        clauses.push("(lower(i.name) LIKE ? ESCAPE '\\' OR lower(i.path) LIKE ? ESCAPE '\\')");
+        let p = format!("%{}%", escape_like(&term));
         values.push(p.clone());
         values.push(p);
     }
@@ -4007,9 +4074,9 @@ fn search_file_rows(conn: &Connection, query: &str, filter: &str) -> Result<Vec<
         "i.is_directory ASC, CAST(i.modified_at AS INTEGER) DESC, i.name COLLATE NOCASE"
     } else {
         values.push(query.to_lowercase());
-        values.push(format!("{}%",query.to_lowercase()));
-        values.push(format!("%{}%",query.to_lowercase()));
-        "CASE WHEN lower(i.name)=? THEN 0 WHEN lower(i.name) LIKE ? THEN 1 WHEN lower(i.name) LIKE ? THEN 2 ELSE 3 END, i.is_directory DESC, i.name COLLATE NOCASE"
+        values.push(format!("{}%",escape_like(&query.to_lowercase())));
+        values.push(format!("%{}%",escape_like(&query.to_lowercase())));
+        "CASE WHEN lower(i.name)=? THEN 0 WHEN lower(i.name) LIKE ? ESCAPE '\\' THEN 1 WHEN lower(i.name) LIKE ? ESCAPE '\\' THEN 2 ELSE 3 END, i.is_directory DESC, i.name COLLATE NOCASE"
     };
     let sql = format!("SELECT i.id,i.name,i.path,i.parent,i.is_directory,i.modified_at, EXISTS(SELECT 1 FROM favorite_items f WHERE f.target=i.path AND f.deleted_at IS NULL AND f.service='folder') FROM file_index i WHERE ({where_sql}) AND {type_clause} ORDER BY {order} LIMIT 200");
     let refs: Vec<&dyn rusqlite::ToSql> =
@@ -4235,6 +4302,64 @@ fn unique_stamp() -> u128 {
 
 #[cfg(test)]
 mod board_tests {
+    #[test]
+    fn unchanged_scan_roots_skip_sql_but_removed_roots_still_prune() {
+        // No file_index table: unchanged roots must return before any full scan.
+        let conn=Connection::open_in_memory().unwrap();
+        let scanned=vec!["C:\\Work\\".into(),"D:/Docs".into()];
+        let configured=vec!["d:/docs/".into(),"c:/work".into()];
+        assert_eq!(prune_if_scan_roots_changed(&conn,&scanned,&configured).unwrap(),0);
+        conn.execute_batch("CREATE TABLE file_index(path TEXT);INSERT INTO file_index VALUES('C:/Work/a.txt'),('D:/Docs/b.txt');").unwrap();
+        assert_eq!(prune_if_scan_roots_changed(&conn,&scanned,&vec!["C:/Work".into()]).unwrap(),1);
+        assert_eq!(conn.query_row("SELECT path FROM file_index",[],|r|r.get::<_,String>(0)).unwrap(),"C:/Work/a.txt");
+    }
+    #[test]
+    fn icon_memory_cache_has_count_and_byte_limits() {
+        let mut cache=IconMemoryCache::default();
+        for i in 0..2000 {cache.insert(format!("icon{i}"),Some("image".into()));}
+        assert_eq!(cache.values.len(),ICON_CACHE_ENTRIES);
+        assert!(cache.get("icon0").is_none());assert!(cache.get("icon1999").is_some());
+        cache.insert("large".into(),Some("x".repeat(ICON_CACHE_BYTES/2)));
+        cache.insert("large2".into(),Some("x".repeat(ICON_CACHE_BYTES/2)));
+        assert!(cache.bytes<=ICON_CACHE_BYTES);
+        assert!(cache.values.len()<=ICON_CACHE_ENTRIES);
+        cache.insert("oversized".into(),Some("x".repeat(ICON_CACHE_BYTES+1)));
+        assert!(cache.get("oversized").is_none());
+        cache.insert("large2".into(),None);
+        assert_eq!(cache.bytes,cache.values.iter().map(|(key,value)|key.len()+value.as_ref().map_or(0,String::len)).sum::<usize>());
+    }
+    #[test]
+    fn backup_validation_rejects_unrelated_sqlite_and_copy_preserves_live_source() {
+        assert!(validate_launcher_backup(&Connection::open_in_memory().unwrap()).is_err());
+        let dir=std::env::temp_dir().join(format!("launcher-backup-test-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("source.db");let backup=dir.join("backup.db");
+        {
+            let conn=Connection::open(&source).unwrap();
+            conn.execute_batch("CREATE TABLE history(id INTEGER,url TEXT,title TEXT); CREATE TABLE favorite_items(id INTEGER,kind TEXT,label TEXT,target TEXT,pane INTEGER);CREATE TABLE settings(id INTEGER);CREATE TABLE favorite_tabs(id INTEGER,name TEXT);CREATE TABLE favorite_columns(id INTEGER,tab_id INTEGER);INSERT INTO favorite_items VALUES(1,'link','保持するリンク','https://example.test',0);").unwrap();
+            validate_launcher_backup(&conn).unwrap();
+        }
+        assert!(copy_database_safely(&source,&source).is_err());
+        copy_database_safely(&source,&backup).unwrap();
+        let conn=Connection::open(&backup).unwrap();
+        assert_eq!(conn.query_row("SELECT label FROM favorite_items",[],|r|r.get::<_,String>(0)).unwrap(),"保持するリンク");
+        drop(conn);
+        copy_database_safely(&source,&backup).unwrap();
+        assert!(Connection::open(&source).unwrap().prepare("SELECT * FROM favorite_items").is_ok());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn search_metacharacters_are_literal() {
+        let conn=Connection::open_in_memory().unwrap();
+        for text in ["100%","a_b",r"C:\Work",r"50%_\資料"] {
+            let pattern=format!("%{}%",escape_like(text));
+            assert!(conn.query_row("SELECT ?1 LIKE ?2 ESCAPE '\\'",params![text,pattern],|r|r.get::<_,bool>(0)).unwrap());
+        }
+        assert!(!conn.query_row("SELECT 'axb' LIKE ?1 ESCAPE '\\'",params![escape_like("a_b")],|r|r.get::<_,bool>(0)).unwrap());
+        let conn=fixture();
+        conn.execute_batch("INSERT INTO file_index VALUES(1,'100%.pdf','C:/100%.pdf','C:/',0,NULL),(2,'100X.pdf','C:/100X.pdf','C:/',0,NULL)").unwrap();
+        assert_eq!(search_file_rows(&conn,"100%","all").unwrap().len(),1);
+    }
     #[test]
     fn unregistering_roots_removes_only_their_index_entries() {
         let conn=Connection::open_in_memory().unwrap();

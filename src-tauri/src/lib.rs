@@ -12,6 +12,7 @@ use tauri_plugin_global_shortcut::Builder as GlobalShortcutBuilder;
 static APP_HANDLE: Lazy<Mutex<Option<tauri::AppHandle>>> = Lazy::new(|| Mutex::new(None));
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
 static FILE_INDEX_RUNNING: AtomicBool = AtomicBool::new(false);
+static DATA_MAINTENANCE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -37,8 +38,8 @@ fn get_settings() -> Result<db::AppSettingsResponse, String> {
 }
 
 #[tauri::command]
-fn save_settings(settings: db::AppSettings) -> Result<db::AppSettings, String> {
-    db::save_settings(settings).map_err(|e| e.to_string())
+async fn save_settings(settings: db::AppSettings) -> Result<db::AppSettings, String> {
+    tauri::async_runtime::spawn_blocking(move ||db::save_settings(settings).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -78,16 +79,16 @@ async fn prepare_favorite_board() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| db::prepare_favorite_board().map_err(|e| e.to_string())).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
-fn save_board_layout(value: String) -> Result<(), String> {
-    db::save_board_layout(&value).map_err(|e|e.to_string())
+async fn save_board_layout(value: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move ||db::save_board_layout(&value).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 fn get_ui_preferences() -> Result<db::UiPreferences, String> {
     db::get_ui_preferences().map_err(|e|e.to_string())
 }
 #[tauri::command]
-fn save_ui_preferences(preferences: db::UiPreferences) -> Result<(), String> {
-    db::save_ui_preferences(preferences).map_err(|e|e.to_string())
+async fn save_ui_preferences(preferences: db::UiPreferences) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move ||db::save_ui_preferences(preferences).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 async fn move_board_item(id: i64, pane: i64, before_id: Option<i64>) -> Result<(), String> {
@@ -173,13 +174,13 @@ fn add_manual_favorite(label: String, target: String, pane: i64) -> Result<i64, 
 }
 
 #[tauri::command]
-fn rename_favorite_item(id: i64, label: String) -> Result<(), String> {
-    db::rename_favorite_item(id, &label).map_err(|e| e.to_string())
+async fn rename_favorite_item(id: i64, label: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move ||db::rename_favorite_item(id,&label).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
-fn delete_favorite_item(id: i64) -> Result<(), String> {
-    db::delete_favorite_item(id).map_err(|e| e.to_string())
+async fn delete_favorite_item(id: i64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move ||db::delete_favorite_item(id).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -198,8 +199,8 @@ fn get_favorite_text_styles() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-fn set_favorite_text_style(id: i64, color: String, bold: bool) -> Result<(), String> {
-    db::set_favorite_text_style(id, &color, bold).map_err(|e|e.to_string())
+async fn set_favorite_text_style(id: i64, color: String, bold: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move ||db::set_favorite_text_style(id,&color,bold).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -208,8 +209,8 @@ fn set_all_heading_colors(color: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_window_size(size: String) -> Result<(), String> {
-    db::save_window_size(&size).map_err(|e| e.to_string())
+async fn save_window_size(size: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move ||db::save_window_size(&size).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -263,8 +264,8 @@ async fn get_file_icon(path: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn toggle_file_favorite(path: String, name: String) -> Result<bool, String> {
-    db::toggle_file_favorite(&path, &name).map_err(|e| e.to_string())
+async fn toggle_file_favorite(path: String, name: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move ||db::toggle_file_favorite(&path,&name).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -283,6 +284,7 @@ async fn rebuild_file_index(folders: Vec<String>) -> Result<db::IndexUpdateSumma
     let _ = db::append_app_log("インデックス", "info", "インデックス作成開始");
     let started = std::time::Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard=DATA_MAINTENANCE.read().map_err(|_| "データ処理ロックに失敗しました".to_string())?;
         db::rebuild_file_index(&folders).map_err(|error| error.to_string())
     })
     .await;
@@ -317,8 +319,8 @@ async fn rebuild_file_index(folders: Vec<String>) -> Result<db::IndexUpdateSumma
 }
 
 #[tauri::command]
-fn get_app_logs() -> Result<Vec<db::AppLogEntry>, String> {
-    db::list_app_logs().map_err(|e| e.to_string())
+async fn get_app_logs() -> Result<Vec<db::AppLogEntry>, String> {
+    tauri::async_runtime::spawn_blocking(||db::list_app_logs().map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -327,12 +329,15 @@ fn clear_app_logs() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn create_backup() -> Result<Option<String>, String> {
-    db::create_backup().map_err(|e| e.to_string())
+async fn create_backup() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(||db::create_backup().map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
-fn restore_backup() -> Result<Option<String>, String> {
-    db::restore_backup().map_err(|e| e.to_string())
+async fn restore_backup() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let _guard=DATA_MAINTENANCE.try_write().map_err(|_| "インデックス更新や履歴受信が実行中です。完了後に復元してください。".to_string())?;
+        db::restore_backup().map_err(|e|e.to_string())
+    }).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 fn diagnostics_text() -> Result<String, String> {
@@ -346,6 +351,7 @@ fn extension_connection_status() -> Result<db::ExtensionConnectionStatus, String
 #[tauri::command]
 async fn import_extension_history() -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(|| {
+        let _guard=DATA_MAINTENANCE.read().map_err(|_| "データ処理ロックに失敗しました".to_string())?;
         db::import_extension_history_queue().map_err(|e| e.to_string())
     })
     .await
@@ -730,7 +736,15 @@ pub fn run() {
             match db::init_and_seed_db() {
                 Ok(path) => {
                     println!("DB initialized at {}", path.display());
-                    let _ = db::create_automatic_backup();
+                    std::thread::spawn(|| {
+                        while !APP_EXITING.load(Ordering::SeqCst) {
+                            if let Ok(_guard)=DATA_MAINTENANCE.read() {
+                                if let Err(error)=db::create_automatic_backup() { let _=db::append_app_log("自動バックアップ","error",&error.to_string()); }
+                            }
+                            // Check hourly, including while the window is hidden.
+                            for _ in 0..60 { std::thread::sleep(std::time::Duration::from_secs(60)); if APP_EXITING.load(Ordering::SeqCst) {return;} }
+                        }
+                    });
                 }
                 Err(e) => eprintln!("DB init error: {}", e),
             }

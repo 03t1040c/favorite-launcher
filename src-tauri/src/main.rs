@@ -50,7 +50,10 @@ fn run_native_history_host() -> std::io::Result<()> {
             .ok()
             .and_then(|value| value.get("fullSync").and_then(|item| item.as_bool()))
             .unwrap_or(false);
-        if is_full_sync_payload {
+        let protocol=value.as_ref().and_then(|v|v.get("protocolVersion")).and_then(|v|v.as_u64()).unwrap_or(1);
+        let complete=value.as_ref().and_then(|v|v.get("fullSyncComplete")).and_then(|v|v.as_bool()).unwrap_or(false);
+        // Legacy extensions still work; v2 keeps the request until all batches finish.
+        if is_full_sync_payload && (protocol < 2 || complete) {
             let _ = std::fs::remove_file(&full_sync_request);
         }
         let interval = std::fs::read_to_string(dir.join("edge-extension-config.json"))
